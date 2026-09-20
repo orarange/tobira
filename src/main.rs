@@ -215,7 +215,7 @@ fn dump_styled_layout(url: &Url) -> Result<()> {
                     println!(
                         "{}#text fs={} {:?}",
                         "  ".repeat(depth),
-                        t.style.font_size_px,
+                        t.style.font_size_mpx,
                         t.text.chars().take(60).collect::<String>()
                     );
                 }
@@ -276,7 +276,7 @@ fn dump_styled_layout(url: &Url) -> Result<()> {
                         e.style.width,
                         e.style.height,
                         e.style.color,
-                        e.style.font_size_px,
+                        e.style.font_size_mpx,
                         e.style.opacity,
                         e.style.padding.top,
                         e.style.padding.right,
@@ -603,7 +603,7 @@ fn dump_styled_layout(url: &Url) -> Result<()> {
         for t in &texts {
             println!(
                 "  {:5},{:5} {:4}x{:<3} {:2}px : {:?}",
-                t.x, t.y, t.width, t.line_height_px, t.font_size_px, t.text
+                t.x, t.y, t.width, t.line_height_px, t.font_size_mpx, t.text
             );
         }
     }

@@ -106,8 +106,8 @@ const UNIX_SERIF_FONT_PATHS: &[&str] = &[
 ///
 /// Roughly a 24th of the type size, which is about the difference between a
 /// regular and a bold stem in most faces, and never less than one pixel.
-fn synthetic_bold_smear(font_size_px: u32) -> u32 {
-    (font_size_px / 24).max(1)
+fn synthetic_bold_smear(font_size_mpx: u32) -> u32 {
+    (crate::css::mpx_to_px(font_size_mpx) / 24).max(1)
 }
 
 /// The file behind each family a page is likely to name, as `(name, regular,
@@ -219,7 +219,7 @@ pub struct FontContext {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 struct GlyphKey {
     character: char,
-    font_size_px: u32,
+    font_size_mpx: u32,
     font_family: FontFamilyKind,
     bold: bool,
 }
@@ -309,7 +309,7 @@ impl FontContext {
         x: u32,
         y: u32,
         text: &str,
-        font_size_px: u32,
+        font_size_mpx: u32,
         color: Color,
         bold: bool,
         underline: bool,
@@ -323,7 +323,7 @@ impl FontContext {
             x as i32,
             y as i32,
             text,
-            font_size_px,
+            font_size_mpx,
             color,
             bold,
             underline,
@@ -349,7 +349,7 @@ impl FontContext {
         x: i32,
         y: i32,
         text: &str,
-        font_size_px: u32,
+        font_size_mpx: u32,
         color: Color,
         bold: bool,
         underline: bool,
@@ -373,9 +373,9 @@ impl FontContext {
             // and a wider step here would walk the text out of the box it was
             // given.
             let advance = self
-                .cached_glyph(character, font_size_px, font_family, false)
+                .cached_glyph(character, font_size_mpx, font_family, false)
                 .advance;
-            let glyph = self.cached_glyph(character, font_size_px, font_family, bold);
+            let glyph = self.cached_glyph(character, font_size_mpx, font_family, bold);
             let smear = glyph.synthetic_bold;
             draw_cached_glyph(buffer, width, height, cursor_x, y, glyph, color, clip_top);
 
@@ -387,7 +387,7 @@ impl FontContext {
                 // that wants four left it looking lighter than the paragraph
                 // below it. Every offset in between is drawn so the stem fills
                 // rather than splits.
-                for offset in 1..=synthetic_bold_smear(font_size_px) as i32 {
+                for offset in 1..=synthetic_bold_smear(font_size_mpx) as i32 {
                     draw_cached_glyph(
                         buffer,
                         width,
@@ -406,8 +406,8 @@ impl FontContext {
 
         if underline && !text.is_empty() {
             let underline_y = y
-                .saturating_add(font_size_px as i32)
-                .saturating_add((font_size_px / 10).max(1) as i32);
+                .saturating_add(crate::css::mpx_to_px(font_size_mpx) as i32)
+                .saturating_add((crate::css::mpx_to_px(font_size_mpx) / 10).max(1) as i32);
             if underline_y >= 0 {
                 draw_rect(
                     buffer,
@@ -415,15 +415,16 @@ impl FontContext {
                     height,
                     x.max(0) as u32,
                     underline_y as u32,
-                    self.text_width_px(text, font_size_px, font_family),
-                    (font_size_px / 12).max(1),
+                    self.text_width_px(text, font_size_mpx, font_family),
+                    (crate::css::mpx_to_px(font_size_mpx) / 12).max(1),
                     color,
                 );
             }
         }
 
         if line_through && !text.is_empty() {
-            let line_through_y = y.saturating_add((font_size_px * 55 / 100) as i32);
+            let line_through_y =
+                y.saturating_add((crate::css::mpx_to_px(font_size_mpx) * 55 / 100) as i32);
             if line_through_y >= 0 {
                 draw_rect(
                     buffer,
@@ -431,8 +432,8 @@ impl FontContext {
                     height,
                     x.max(0) as u32,
                     line_through_y as u32,
-                    self.text_width_px(text, font_size_px, font_family),
-                    (font_size_px / 12).max(1),
+                    self.text_width_px(text, font_size_mpx, font_family),
+                    (crate::css::mpx_to_px(font_size_mpx) / 12).max(1),
                     color,
                 );
             }
@@ -442,12 +443,12 @@ impl FontContext {
     pub fn glyph_advance_px(
         &mut self,
         character: char,
-        font_size_px: u32,
+        font_size_mpx: u32,
         font_family: FontFamilyKind,
     ) -> u32 {
         // Measurement always uses the regular cut: layout is done before
         // anything knows a run will be drawn bold, and the two have to agree.
-        self.cached_glyph(character, font_size_px, font_family, false)
+        self.cached_glyph(character, font_size_mpx, font_family, false)
             .advance_px
     }
 
@@ -459,13 +460,13 @@ impl FontContext {
     pub fn text_width_px(
         &mut self,
         text: &str,
-        font_size_px: u32,
+        font_size_mpx: u32,
         font_family: FontFamilyKind,
     ) -> u32 {
         let total: f32 = text
             .chars()
             .map(|character| {
-                self.cached_glyph(character, font_size_px, font_family, false)
+                self.cached_glyph(character, font_size_mpx, font_family, false)
                     .advance
             })
             .sum();
@@ -478,8 +479,8 @@ impl FontContext {
     /// It was a third of the font size added to the ascent, which for Arial at
     /// 16px gives 21 where a browser gives 18. Three pixels a line does not
     /// look like much until a long article has two thousand of them.
-    pub fn line_height_px(&mut self, font_size_px: u32, font_family: FontFamilyKind) -> u32 {
-        self.line_metrics(font_size_px, font_family)
+    pub fn line_height_px(&mut self, font_size_mpx: u32, font_family: FontFamilyKind) -> u32 {
+        self.line_metrics(font_size_mpx, font_family)
             .normal_line_px
             .max(1)
     }
@@ -487,8 +488,8 @@ impl FontContext {
     /// The height of an inline box's content area: ascent plus descent, each
     /// rounded on its own. Distinct from `line_height_px`, which is how far
     /// apart two lines sit -- that one includes the face's line gap.
-    pub fn content_height_px(&mut self, font_size_px: u32, font_family: FontFamilyKind) -> u32 {
-        self.line_metrics(font_size_px, font_family).content_px.max(1)
+    pub fn content_height_px(&mut self, font_size_mpx: u32, font_family: FontFamilyKind) -> u32 {
+        self.line_metrics(font_size_mpx, font_family).content_px.max(1)
     }
 
     /// How far below the baseline the face reaches, at this size.
@@ -496,16 +497,16 @@ impl FontContext {
     /// Half the leading is added on top of it when a line is taller than the
     /// letters, which is what puts a line of text in the middle of its own
     /// box.
-    pub fn descent_px(&mut self, font_size_px: u32, font_family: FontFamilyKind) -> u32 {
-        self.line_metrics(font_size_px, font_family).descent_px
+    pub fn descent_px(&mut self, font_size_mpx: u32, font_family: FontFamilyKind) -> u32 {
+        self.line_metrics(font_size_mpx, font_family).descent_px
     }
 
     fn line_metrics(
         &mut self,
-        font_size_px: u32,
+        font_size_mpx: u32,
         font_family: FontFamilyKind,
     ) -> CachedLineMetrics {
-        let key = (font_family, font_size_px);
+        let key = (font_family, font_size_mpx);
         if let Some(metrics) = self.line_metrics_cache.get(&key) {
             return *metrics;
         }
@@ -517,7 +518,7 @@ impl FontContext {
             .fonts_for(font_family, false)
             .iter()
             .find_map(|font| {
-                font.horizontal_line_metrics(font_size_px as f32)
+                font.horizontal_line_metrics(crate::css::mpx_to_f32(font_size_mpx))
                     .map(|line| CachedLineMetrics {
                         ascent_px: line.ascent.ceil() as i32,
                         descent_px: (-line.descent).ceil().max(0.0) as u32,
@@ -546,12 +547,13 @@ impl FontContext {
                     })
             })
             .unwrap_or(CachedLineMetrics {
-                ascent_px: font_size_px as i32,
-                descent_px: (font_size_px as f32 * 0.21).round() as u32,
+                ascent_px: crate::css::mpx_to_px(font_size_mpx) as i32,
+                descent_px: (crate::css::mpx_to_f32(font_size_mpx) * 0.21).round() as u32,
                 // No face to ask: the ratio a browser lands on for the common
                 // text faces.
-                normal_line_px: (font_size_px as f32 * 1.15).round().max(1.0) as u32,
-                content_px: (font_size_px as f32 * 1.15).round().max(1.0) as u32,
+                normal_line_px: (crate::css::mpx_to_f32(font_size_mpx) * 1.15).round().max(1.0)
+                    as u32,
+                content_px: (crate::css::mpx_to_f32(font_size_mpx) * 1.15).round().max(1.0) as u32,
             });
 
         self.line_metrics_cache.insert(key, metrics);
@@ -561,19 +563,19 @@ impl FontContext {
     fn cached_glyph(
         &mut self,
         character: char,
-        font_size_px: u32,
+        font_size_mpx: u32,
         font_family: FontFamilyKind,
         bold: bool,
     ) -> &CachedGlyph {
         let key = GlyphKey {
             character,
-            font_size_px,
+            font_size_mpx,
             font_family,
             bold,
         };
 
         if !self.glyph_cache.contains_key(&key) {
-            let glyph = self.rasterize_glyph(character, font_size_px, font_family, bold);
+            let glyph = self.rasterize_glyph(character, font_size_mpx, font_family, bold);
             self.glyph_cache.insert(key, glyph);
         }
 
@@ -585,11 +587,11 @@ impl FontContext {
     fn rasterize_glyph(
         &mut self,
         character: char,
-        font_size_px: u32,
+        font_size_mpx: u32,
         font_family: FontFamilyKind,
         bold: bool,
     ) -> CachedGlyph {
-        let ascent_px = self.line_metrics(font_size_px, font_family).ascent_px;
+        let ascent_px = self.line_metrics(font_size_mpx, font_family).ascent_px;
 
         // Default-invisible characters: variation selectors (U+FE0F makes "⚛️"
         // = U+269B + U+FE0F), zero-width (non-)joiners, and the BOM must render
@@ -628,7 +630,7 @@ impl FontContext {
         let stack_is_bold = bold && !synthetic_bold;
         self.ensure_font_for(character, font_family, stack_is_bold);
 
-        let fallback_advance = estimated_glyph_advance_px(character, font_size_px, font_family);
+        let fallback_advance = estimated_glyph_advance_px(character, font_size_mpx, font_family);
 
         // The face the page named first, then the general stack. A named face
         // covers the letters it was made for and no more: Wikipedia asks for
@@ -645,7 +647,8 @@ impl FontContext {
                     continue;
                 }
 
-                let (metrics, bitmap) = font.rasterize(character, font_size_px as f32);
+                let (metrics, bitmap) =
+                    font.rasterize(character, crate::css::mpx_to_f32(font_size_mpx));
                 // No floor on the real advance. Four pixels was a floor for
                 // every glyph at every size, and a narrow letter is narrower
                 // than that whenever the type is small: Arial's `i` is 2.2px
@@ -695,7 +698,7 @@ impl FontContext {
             }
         }
 
-        let scale = ((font_size_px + 7) / 8).max(1);
+        let scale = ((crate::css::mpx_to_px(font_size_mpx) + 7) / 8).max(1);
         let glyph = lookup_bitmap_glyph(character).unwrap_or_else(|| {
             lookup_bitmap_glyph('?').unwrap_or([
                 0b00111100, 0b01000010, 0b00000100, 0b00001000, 0b00010000, 0, 0b00010000, 0,
@@ -838,22 +841,22 @@ impl FontContext {
 }
 
 #[cfg(test)]
-pub fn estimated_text_width_px(text: &str, font_size_px: u32, font_family: FontFamilyKind) -> u32 {
+pub fn estimated_text_width_px(text: &str, font_size_mpx: u32, font_family: FontFamilyKind) -> u32 {
     text.chars()
-        .map(|character| estimated_glyph_advance_px(character, font_size_px, font_family))
+        .map(|character| estimated_glyph_advance_px(character, font_size_mpx, font_family))
         .sum()
 }
 
 pub fn estimated_glyph_advance_px(
     character: char,
-    font_size_px: u32,
+    font_size_mpx: u32,
     font_family: FontFamilyKind,
 ) -> u32 {
     // Only used when no face could be loaded at all, so a named family is
     // guessed at the same width as the proportional ones.
     let base = match font_family {
-        FontFamilyKind::Monospace => ((font_size_px as f32) * 0.62).round() as u32,
-        _ => ((font_size_px as f32) * 0.56).round() as u32,
+        FontFamilyKind::Monospace => (crate::css::mpx_to_f32(font_size_mpx) * 0.62).round() as u32,
+        _ => (crate::css::mpx_to_f32(font_size_mpx) * 0.56).round() as u32,
     }
     .max(MIN_ADVANCE_PX);
 
@@ -1109,6 +1112,7 @@ fn lookup_bitmap_glyph(character: char) -> Option<[u8; 8]> {
 
 #[cfg(test)]
 mod tests {
+    use crate::css::MPX;
 
     use super::{FontContext, estimated_glyph_advance_px, estimated_text_width_px};
     use crate::css::FontFamilyKind;
@@ -1121,7 +1125,7 @@ mod tests {
     #[test]
     fn a_line_advances_further_than_its_content_area() {
         let mut fonts = FontContext::load();
-        for size in [12u32, 16, 20, 32] {
+        for size in [12u32 * MPX, 16 * MPX, 20 * MPX, 32 * MPX] {
             let advance = fonts.line_height_px(size, FontFamilyKind::Sans);
             let content = fonts.content_height_px(size, FontFamilyKind::Sans);
             assert!(
@@ -1154,11 +1158,12 @@ mod tests {
             FontFamilyKind::Monospace,
         ] {
             fonts.ensure_family_loaded(family, false);
-            for size in [8u32, 11, 12, 16, 22, 28, 40] {
+            for size_px in [8u32, 11, 12, 16, 22, 28, 40] {
+                let size = size_px * MPX;
                 let Some(line) = fonts
                     .fonts_for(family, false)
                     .iter()
-                    .find_map(|font| font.horizontal_line_metrics(size as f32))
+                    .find_map(|font| font.horizontal_line_metrics(size_px as f32))
                 else {
                     continue;
                 };
@@ -1169,7 +1174,7 @@ mod tests {
                 assert_eq!(
                     fonts.line_height_px(size, family),
                     expected,
-                    "{family:?} at {size}px: ascent {}, descent {}, gap {}",
+                    "{family:?} at {size_px}px: ascent {}, descent {}, gap {}",
                     line.ascent,
                     line.descent,
                     line.line_gap
@@ -1212,8 +1217,8 @@ mod tests {
     fn a_run_grows_in_proportion_with_its_type() {
         let mut fonts = FontContext::load();
         let text = "Hamburgefonstiv";
-        let at_10 = fonts.text_width_px(text, 10, FontFamilyKind::Sans) as f32;
-        let at_20 = fonts.text_width_px(text, 20, FontFamilyKind::Sans) as f32;
+        let at_10 = fonts.text_width_px(text, 10 * MPX, FontFamilyKind::Sans) as f32;
+        let at_20 = fonts.text_width_px(text, 20 * MPX, FontFamilyKind::Sans) as f32;
         let ratio = at_20 / at_10;
         assert!(
             (ratio - 2.0).abs() < 0.15,
@@ -1223,15 +1228,15 @@ mod tests {
 
     #[test]
     fn wide_characters_take_more_space() {
-        let latin = estimated_glyph_advance_px('A', 20, FontFamilyKind::Sans);
-        let wide = estimated_glyph_advance_px('漢', 20, FontFamilyKind::Sans);
+        let latin = estimated_glyph_advance_px('A', 20 * MPX, FontFamilyKind::Sans);
+        let wide = estimated_glyph_advance_px('漢', 20 * MPX, FontFamilyKind::Sans);
 
         assert!(wide >= latin * 2);
     }
 
     #[test]
     fn text_width_adds_character_advances() {
-        let width = estimated_text_width_px("Hi", 16, FontFamilyKind::Sans);
+        let width = estimated_text_width_px("Hi", 16 * MPX, FontFamilyKind::Sans);
         assert!(width >= 16);
     }
 
@@ -1242,8 +1247,8 @@ mod tests {
     fn invisible_characters_render_as_nothing() {
         let mut context = FontContext::load();
         for ch in ['\u{FE0F}', '\u{200B}', '\u{200D}', '\u{FEFF}'] {
-            let with = context.text_width_px(&format!("A{ch}B"), 18, FontFamilyKind::Sans);
-            let without = context.text_width_px("AB", 18, FontFamilyKind::Sans);
+            let with = context.text_width_px(&format!("A{ch}B"), 18 * MPX, FontFamilyKind::Sans);
+            let without = context.text_width_px("AB", 18 * MPX, FontFamilyKind::Sans);
             assert_eq!(
                 with, without,
                 "U+{:04X} should have zero advance",
@@ -1259,7 +1264,7 @@ mod tests {
             4,
             4,
             "\u{FE0F}\u{200D}",
-            18,
+            18 * MPX,
             0x00FFFFFF,
             false,
             false,
@@ -1286,7 +1291,7 @@ mod tests {
             8,
             8,
             "\u{269B}",
-            24,
+            24 * MPX,
             0x00FFFFFF,
             false,
             false,
@@ -1312,7 +1317,7 @@ mod tests {
             8,
             8,
             "Hello",
-            18,
+            18 * MPX,
             0x00112233,
             false,
             false,
@@ -1326,6 +1331,7 @@ mod tests {
 
 #[cfg(test)]
 mod lazy_loading_tests {
+    use crate::css::MPX;
     use super::*;
 
     /// `fontdue` expands a font to roughly 40x its file size when it parses one,
@@ -1415,13 +1421,13 @@ mod lazy_loading_tests {
         if fonts.sans_fonts.is_empty() {
             return; // no system fonts available
         }
-        let line = fonts.line_height_px(16, FontFamilyKind::Sans);
+        let line = fonts.line_height_px(16 * MPX, FontFamilyKind::Sans);
         assert!(
             (17..=19).contains(&line),
             "16px sans should give a line of about 18px, got {line}"
         );
         // It scales with the size rather than sitting on a fixed gap.
-        let doubled = fonts.line_height_px(32, FontFamilyKind::Sans);
+        let doubled = fonts.line_height_px(32 * MPX, FontFamilyKind::Sans);
         assert!(
             doubled >= line * 2 - 2 && doubled <= line * 2 + 2,
             "32px should be about double 16px: {line} vs {doubled}"

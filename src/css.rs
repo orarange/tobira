@@ -1366,7 +1366,7 @@ pub fn computed_property_string(
             None => "rgba(0, 0, 0, 0)".to_string(),
         },
         "border-color" => colour(style.border_color),
-        "font-size" => px(style.font_size_px),
+        "font-size" => css_px_string(style.font_size_mpx),
         "font-weight" => if style.font_weight { "700" } else { "400" }.to_string(),
         "font-style" => if style.font_style_italic {
             "italic"
@@ -1378,7 +1378,9 @@ pub fn computed_property_string(
             if style.line_height == 0 {
                 "normal".to_string()
             } else {
-                px(style.font_size_px * style.line_height / 1000)
+                css_px_string(
+                    ((style.font_size_mpx as u64 * style.line_height as u64) / 1000) as u32,
+                )
             }
         }
         "opacity" => format!("{}", style.opacity as f32 / 255.0),
@@ -1519,7 +1521,7 @@ pub struct ComputedStyle {
     pub padding: EdgeSizes,
     pub width: Option<LengthValue>,
     pub height: Option<LengthValue>,
-    pub font_size_px: u32,
+    pub font_size_mpx: u32,
     pub font_family: FontFamilyKind,
     pub text_align: TextAlign,
     /// `text-wrap: balance` -- spread the run over the same number of lines,
@@ -1749,7 +1751,9 @@ pub struct ComputedStyle {
 
 impl ComputedStyle {
     pub(crate) fn for_element(tag_name: &str, parent: Option<&Self>) -> Self {
-        let parent_font_size = parent.map(|s| s.font_size_px).unwrap_or(16);
+        let parent_font_size_mpx = parent
+            .map(|s| s.font_size_mpx)
+            .unwrap_or(INITIAL_FONT_SIZE_MPX);
         let mut style = Self {
             // Custom properties inherit; the ancestors' map is shared, not copied.
             border_color_transparent: false,
@@ -1778,7 +1782,7 @@ impl ComputedStyle {
             justify_items: AlignItems::Stretch,
             width: None,
             height: None,
-            font_size_px: parent_font_size,
+            font_size_mpx: parent_font_size_mpx,
             font_family: parent
                 .map(|s| s.font_family)
                 .unwrap_or(FontFamilyKind::Sans),
@@ -1906,32 +1910,32 @@ impl ComputedStyle {
             // 0.67em/2.33em. Ours ran a step large from h2 down, so a page
             // that leaves its headings alone showed them all too big.
             "h1" => {
-                style.font_size_px = 32;
+                style.font_size_mpx = 32 * MPX;
                 style.font_weight = true;
                 style.margin = SignedEdgeSizes::vertical(21, 21);
             }
             "h2" => {
-                style.font_size_px = 24;
+                style.font_size_mpx = 24 * MPX;
                 style.font_weight = true;
                 style.margin = SignedEdgeSizes::vertical(20, 20);
             }
             "h3" => {
-                style.font_size_px = 19;
+                style.font_size_mpx = 19 * MPX;
                 style.font_weight = true;
                 style.margin = SignedEdgeSizes::vertical(19, 19);
             }
             "h4" => {
-                style.font_size_px = 16;
+                style.font_size_mpx = 16 * MPX;
                 style.font_weight = true;
                 style.margin = SignedEdgeSizes::vertical(21, 21);
             }
             "h5" => {
-                style.font_size_px = 13;
+                style.font_size_mpx = 13 * MPX;
                 style.font_weight = true;
                 style.margin = SignedEdgeSizes::vertical(22, 22);
             }
             "h6" => {
-                style.font_size_px = 11;
+                style.font_size_mpx = 11 * MPX;
                 style.font_weight = true;
                 style.margin = SignedEdgeSizes::vertical(25, 25);
             }
@@ -1965,15 +1969,17 @@ impl ComputedStyle {
             // which is what puts a footnote marker beside the word rather than
             // in the middle of it.
             "sup" | "sub" => {
-                style.font_size_px = (parent_font_size * 83 / 100).max(1);
-                let shift = (parent_font_size * 33 / 100) as i32;
+                style.font_size_mpx = (parent_font_size_mpx * 83 / 100).max(1);
+                let shift = (mpx_to_px(parent_font_size_mpx) * 33 / 100) as i32;
                 style.baseline_shift = if tag_name == "sup" { -shift } else { shift / 2 };
             }
             "small" => {
-                style.font_size_px = parent_font_size.saturating_sub(2).max(12);
+                style.font_size_mpx = parent_font_size_mpx
+                    .saturating_sub(2 * MPX)
+                    .max(12 * MPX);
             }
             "big" => {
-                style.font_size_px = parent_font_size.saturating_add(2);
+                style.font_size_mpx = parent_font_size_mpx.saturating_add(2 * MPX);
             }
             "td" | "th" => {
                 style.vertical_align = VerticalAlign::Middle;
@@ -3146,15 +3152,51 @@ pub(crate) fn interned_style_count() -> usize {
 
 /// Font size a document starts from, and the basis for `rem` until the root
 /// element says otherwise.
-pub const INITIAL_FONT_SIZE: u32 = 16;
+pub const INITIAL_FONT_SIZE_MPX: u32 = 16 * MPX;
+
+/// Font sizes are held in **ten-thousandths of a pixel**, so that `0.8333em`
+/// is 133328 rather than the 13 an integer pixel would round it to, and
+/// `getComputedStyle` can answer "13.3333px" the way Chrome does. Chrome keeps
+/// the fraction, and a fifth of a pixel per character adds up to whole words
+/// by the end of a line: `tools/geom/fsize.html` scored 3/12 on that alone.
+///
+/// A fixed point rather than an `f32` because `ComputedStyle` derives `Eq`
+/// and `Hash` and is interned in a `HashSet<Arc<ComputedStyle>>`; `line_height`
+/// already keeps a ratio in thousandths the same way. Everything downstream of
+/// layout stays in whole pixels -- only the type size carries the fraction.
+pub const MPX: u32 = 10_000;
+
+/// A length in [`MPX`]ths as CSS writes it: "13.3333px", "16px".
+pub fn css_px_string(value_mpx: u32) -> String {
+    if value_mpx % MPX == 0 {
+        return format!("{}px", value_mpx / MPX);
+    }
+    let text = format!("{:.4}", value_mpx as f64 / MPX as f64);
+    format!("{}px", text.trim_end_matches('0').trim_end_matches('.'))
+}
+
+/// [`MPX`]ths of a pixel to whole pixels, to the nearest.
+pub fn mpx_to_px(value_mpx: u32) -> u32 {
+    ((value_mpx as u64 + (MPX / 2) as u64) / MPX as u64).min(u32::MAX as u64) as u32
+}
+
+/// Whole pixels to [`MPX`]ths of one.
+pub fn px_to_mpx(value_px: u32) -> u32 {
+    value_px.saturating_mul(MPX)
+}
+
+/// A size in [`MPX`]ths as the real number a font wants.
+pub fn mpx_to_f32(value_mpx: u32) -> f32 {
+    value_mpx as f32 / MPX as f32
+}
 
 thread_local! {
     /// Computed `font-size` of the root element -- what `rem` is relative to.
-    static ROOT_FONT_SIZE: Cell<u32> = const { Cell::new(INITIAL_FONT_SIZE) };
+    static ROOT_FONT_SIZE_MPX: Cell<u32> = const { Cell::new(INITIAL_FONT_SIZE_MPX) };
 }
 
-fn root_font_size() -> u32 {
-    ROOT_FONT_SIZE.with(|size| size.get())
+fn root_font_size_mpx() -> u32 {
+    ROOT_FONT_SIZE_MPX.with(|size| size.get())
 }
 
 /// Work out what `rem` means for this document, before anything is styled.
@@ -3171,7 +3213,7 @@ fn establish_root_font_size(
     viewport_width: u32,
     interactive: &InteractiveState,
 ) {
-    ROOT_FONT_SIZE.with(|size| size.set(INITIAL_FONT_SIZE));
+    ROOT_FONT_SIZE_MPX.with(|size| size.set(INITIAL_FONT_SIZE_MPX));
     let Some(root) = root_element(document) else {
         return;
     };
@@ -3189,7 +3231,7 @@ fn establish_root_font_size(
         viewport_width,
         interactive,
     );
-    ROOT_FONT_SIZE.with(|size| size.set(style.font_size_px));
+    ROOT_FONT_SIZE_MPX.with(|size| size.set(style.font_size_mpx));
 }
 
 /// The `<html>` element, however deeply the parser nested it.
@@ -3996,14 +4038,14 @@ fn collect_pseudo_content(
             if decl.property == "content" {
                 content_text = parse_content_for(&value, Some(element));
             } else {
-                // Use host_style.font_size_px so em/% units in pseudo-element rules
+                // Use host_style.font_size_mpx so em/% units in pseudo-element rules
                 // resolve against the originating element's font size (not a hardcoded 16px).
                 let resolved = Declaration {
                     property: decl.property.clone(),
                     value: value.into_owned(),
                     important: decl.important,
                 };
-                apply_declaration(&mut pseudo_style, &resolved, host_style.font_size_px);
+                apply_declaration(&mut pseudo_style, &resolved, host_style.font_size_mpx);
             }
         }
     }
@@ -4047,7 +4089,7 @@ pub fn compute_placeholder_style(
         }
         has_match = true;
         for decl in &rule.declarations {
-            apply_declaration(&mut pseudo_style, decl, host_style.font_size_px);
+            apply_declaration(&mut pseudo_style, decl, host_style.font_size_mpx);
         }
     }
     if has_match { Some(pseudo_style) } else { None }
@@ -4093,8 +4135,10 @@ fn compute_style_with_rules(
     interactive: &InteractiveState,
 ) -> ComputedStyle {
     let mut style = ComputedStyle::for_element(&element.tag_name, parent_style);
-    let parent_font_size = parent_style.map(|c| c.font_size_px).unwrap_or(16);
-    apply_legacy_attributes(&mut style, element, parent_font_size);
+    let parent_font_size_mpx = parent_style
+        .map(|c| c.font_size_mpx)
+        .unwrap_or(INITIAL_FONT_SIZE_MPX);
+    apply_legacy_attributes(&mut style, element, parent_font_size_mpx);
 
     let identity = ElementIdentity::from(element);
     // `:has()` is the only selector that looks downwards, and it is rare, so the
@@ -4365,9 +4409,9 @@ fn compute_style_with_rules(
         // `font-size` itself is relative to the parent; everything else is
         // relative to what this element ended up with.
         let em_basis = if matches!(declaration.property.as_str(), "font-size" | "font") {
-            parent_font_size
+            parent_font_size_mpx
         } else {
-            style.font_size_px
+            style.font_size_mpx
         };
         apply_declaration(&mut style, &declaration, em_basis);
     }
@@ -4380,9 +4424,9 @@ fn compute_style_with_rules(
     {
         for declaration in keyframe_declarations_at(stops, progress, style.animation_timing) {
             let em_basis = if matches!(declaration.property.as_str(), "font-size" | "font") {
-                parent_font_size
+                parent_font_size_mpx
             } else {
-                style.font_size_px
+                style.font_size_mpx
             };
             apply_declaration(&mut style, &declaration, em_basis);
         }
@@ -4723,7 +4767,7 @@ fn parse_filter_value(input: &str, style: &mut ComputedStyle) {
         if let Some(inner) = rest.strip_prefix("blur(") {
             if let Some(end) = inner.find(')') {
                 let arg = &inner[..end];
-                if let Some(px) = parse_length(arg.trim(), 16) {
+                if let Some(px) = parse_length(arg.trim(), INITIAL_FONT_SIZE_MPX) {
                     style.filter_blur_px = px;
                 }
                 rest = &inner[end + 1..];
@@ -5001,7 +5045,7 @@ fn parse_css_time_ms(token: &str) -> Option<i32> {
     None
 }
 
-fn apply_declaration(style: &mut ComputedStyle, declaration: &Declaration, parent_font_size: u32) {
+fn apply_declaration(style: &mut ComputedStyle, declaration: &Declaration, parent_font_size_mpx: u32) {
     let value = &declaration.value;
     match declaration.property.as_str() {
         // The two-value logical shorthands. `margin-inline: a b` sets the left
@@ -5034,7 +5078,7 @@ fn apply_declaration(style: &mut ComputedStyle, declaration: &Declaration, paren
                         value: value.clone(),
                         important: declaration.important,
                     },
-                    parent_font_size,
+                    parent_font_size_mpx,
                 );
             }
         }
@@ -5089,7 +5133,7 @@ fn apply_declaration(style: &mut ComputedStyle, declaration: &Declaration, paren
             style.background_size = match v.as_str() {
                 "cover" => BackgroundSize::Cover,
                 "contain" => BackgroundSize::Contain,
-                other => parse_background_size_lengths(other, style.font_size_px)
+                other => parse_background_size_lengths(other, style.font_size_mpx)
                     .unwrap_or(BackgroundSize::Auto),
             };
         }
@@ -5157,8 +5201,8 @@ fn apply_declaration(style: &mut ComputedStyle, declaration: &Declaration, paren
             };
         }
         "font-size" => {
-            if let Some(font_size) = parse_font_size(value, parent_font_size) {
-                style.font_size_px = font_size.max(8);
+            if let Some(font_size) = parse_font_size(value, parent_font_size_mpx) {
+                style.font_size_mpx = font_size.max(8 * MPX);
             }
         }
         "font-family" => {
@@ -5174,14 +5218,14 @@ fn apply_declaration(style: &mut ComputedStyle, declaration: &Declaration, paren
             style.font_style_italic = matches!(v.as_str(), "italic" | "oblique");
         }
         "font" => {
-            parse_font_shorthand(style, value, parent_font_size);
+            parse_font_shorthand(style, value, parent_font_size_mpx);
         }
         "width" => {
             let v = value.trim().to_ascii_lowercase();
             if v == "auto" {
                 style.width = None;
             } else {
-                style.width = parse_length_value(value, parent_font_size);
+                style.width = parse_length_value(value, parent_font_size_mpx);
             }
         }
         "height" => {
@@ -5189,7 +5233,7 @@ fn apply_declaration(style: &mut ComputedStyle, declaration: &Declaration, paren
             if v == "auto" {
                 style.height = None;
             } else {
-                style.height = parse_length_value(value, parent_font_size);
+                style.height = parse_length_value(value, parent_font_size_mpx);
             }
         }
         "max-width" => {
@@ -5197,7 +5241,7 @@ fn apply_declaration(style: &mut ComputedStyle, declaration: &Declaration, paren
             if v == "none" {
                 style.max_width = None;
             } else {
-                style.max_width = parse_length_value(value, parent_font_size);
+                style.max_width = parse_length_value(value, parent_font_size_mpx);
             }
         }
         "min-width" => {
@@ -5205,7 +5249,7 @@ fn apply_declaration(style: &mut ComputedStyle, declaration: &Declaration, paren
             if v == "auto" {
                 style.min_width = None;
             } else {
-                style.min_width = parse_length_value(value, parent_font_size);
+                style.min_width = parse_length_value(value, parent_font_size_mpx);
             }
         }
         "max-height" => {
@@ -5213,11 +5257,11 @@ fn apply_declaration(style: &mut ComputedStyle, declaration: &Declaration, paren
             if v == "none" {
                 style.max_height = None;
             } else {
-                style.max_height = parse_length(value, parent_font_size);
+                style.max_height = parse_length(value, parent_font_size_mpx);
             }
         }
         "min-height" => {
-            style.min_height = parse_length(value, parent_font_size).unwrap_or(0);
+            style.min_height = parse_length(value, parent_font_size_mpx).unwrap_or(0);
         }
         // `text-wrap` also carries `nowrap`, which `white-space` already
         // covers, and `stable`, which is about reflow while editing.
@@ -5244,7 +5288,7 @@ fn apply_declaration(style: &mut ComputedStyle, declaration: &Declaration, paren
             // `sup { vertical-align: baseline }` puts a footnote marker back on
             // the line the way a page that writes it expects.
             let keyword = value.trim().to_ascii_lowercase();
-            let em_third = (parent_font_size * 33 / 100) as i32;
+            let em_third = (mpx_to_px(parent_font_size_mpx) * 33 / 100) as i32;
             match keyword.as_str() {
                 "super" => style.baseline_shift = -em_third,
                 "sub" => style.baseline_shift = em_third / 2,
@@ -5280,13 +5324,13 @@ fn apply_declaration(style: &mut ComputedStyle, declaration: &Declaration, paren
             style.text_transform = parse_text_transform(value);
         }
         "text-indent" => {
-            style.text_indent = parse_length_signed(value, parent_font_size).unwrap_or(0);
+            style.text_indent = parse_length_signed(value, parent_font_size_mpx).unwrap_or(0);
         }
         "letter-spacing" => {
             let v = value.trim().to_ascii_lowercase();
             if v == "normal" {
                 style.letter_spacing = 0;
-            } else if let Some(px) = parse_signed_length(value, parent_font_size) {
+            } else if let Some(px) = parse_signed_length(value, parent_font_size_mpx) {
                 style.letter_spacing = px;
             }
         }
@@ -5302,15 +5346,15 @@ fn apply_declaration(style: &mut ComputedStyle, declaration: &Declaration, paren
             style.break_long_words = matches!(value.trim(), "break-all" | "break-word");
         }
         "margin" => {
-            parse_margin_shorthand(style, value, parent_font_size);
+            parse_margin_shorthand(style, value, parent_font_size_mpx);
         }
         "padding" => {
-            if let Some(edges) = parse_box_shorthand(value, parent_font_size) {
+            if let Some(edges) = parse_box_shorthand(value, parent_font_size_mpx) {
                 style.padding = edges;
             }
         }
         "margin-top" => {
-            if let Some(v) = parse_length_signed(value, parent_font_size) {
+            if let Some(v) = parse_length_signed(value, parent_font_size_mpx) {
                 style.margin.top = v;
             }
         }
@@ -5319,13 +5363,13 @@ fn apply_declaration(style: &mut ComputedStyle, declaration: &Declaration, paren
             if v == "auto" {
                 style.margin_right_auto = true;
                 style.margin.right = 0;
-            } else if let Some(v) = parse_length_signed(value, parent_font_size) {
+            } else if let Some(v) = parse_length_signed(value, parent_font_size_mpx) {
                 style.margin_right_auto = false;
                 style.margin.right = v;
             }
         }
         "margin-bottom" => {
-            if let Some(v) = parse_length_signed(value, parent_font_size) {
+            if let Some(v) = parse_length_signed(value, parent_font_size_mpx) {
                 style.margin.bottom = v;
             }
         }
@@ -5334,69 +5378,69 @@ fn apply_declaration(style: &mut ComputedStyle, declaration: &Declaration, paren
             if v == "auto" {
                 style.margin_left_auto = true;
                 style.margin.left = 0;
-            } else if let Some(v) = parse_length_signed(value, parent_font_size) {
+            } else if let Some(v) = parse_length_signed(value, parent_font_size_mpx) {
                 style.margin_left_auto = false;
                 style.margin.left = v;
             }
         }
         "padding-top" => {
-            if let Some(v) = parse_length(value, parent_font_size) {
+            if let Some(v) = parse_length(value, parent_font_size_mpx) {
                 style.padding.top = v;
             }
         }
         "padding-right" => {
-            if let Some(v) = parse_length(value, parent_font_size) {
+            if let Some(v) = parse_length(value, parent_font_size_mpx) {
                 style.padding.right = v;
             }
         }
         "padding-bottom" => {
-            if let Some(v) = parse_length(value, parent_font_size) {
+            if let Some(v) = parse_length(value, parent_font_size_mpx) {
                 style.padding.bottom = v;
             }
         }
         "padding-left" => {
-            if let Some(v) = parse_length(value, parent_font_size) {
+            if let Some(v) = parse_length(value, parent_font_size_mpx) {
                 style.padding.left = v;
             }
         }
         // Border shorthands
         "border" => {
-            parse_border_shorthand(style, value, parent_font_size);
+            parse_border_shorthand(style, value, parent_font_size_mpx);
         }
         "border-width" => {
-            if let Some(edges) = parse_box_shorthand(value, parent_font_size) {
+            if let Some(edges) = parse_box_shorthand(value, parent_font_size_mpx) {
                 style.border = edges;
             }
         }
         "border-top" => {
-            parse_border_side_shorthand(style, value, parent_font_size, "top");
+            parse_border_side_shorthand(style, value, parent_font_size_mpx, "top");
         }
         "border-right" => {
-            parse_border_side_shorthand(style, value, parent_font_size, "right");
+            parse_border_side_shorthand(style, value, parent_font_size_mpx, "right");
         }
         "border-bottom" => {
-            parse_border_side_shorthand(style, value, parent_font_size, "bottom");
+            parse_border_side_shorthand(style, value, parent_font_size_mpx, "bottom");
         }
         "border-left" => {
-            parse_border_side_shorthand(style, value, parent_font_size, "left");
+            parse_border_side_shorthand(style, value, parent_font_size_mpx, "left");
         }
         "border-top-width" => {
-            if let Some(v) = parse_length(value, parent_font_size) {
+            if let Some(v) = parse_length(value, parent_font_size_mpx) {
                 style.border.top = v;
             }
         }
         "border-right-width" => {
-            if let Some(v) = parse_length(value, parent_font_size) {
+            if let Some(v) = parse_length(value, parent_font_size_mpx) {
                 style.border.right = v;
             }
         }
         "border-bottom-width" => {
-            if let Some(v) = parse_length(value, parent_font_size) {
+            if let Some(v) = parse_length(value, parent_font_size_mpx) {
                 style.border.bottom = v;
             }
         }
         "border-left-width" => {
-            if let Some(v) = parse_length(value, parent_font_size) {
+            if let Some(v) = parse_length(value, parent_font_size_mpx) {
                 style.border.left = v;
             }
         }
@@ -5430,41 +5474,41 @@ fn apply_declaration(style: &mut ComputedStyle, declaration: &Declaration, paren
             // Only the first value used to be read, so `10px 10px 0 0` -- a
             // card or a tab, rounded on top and square where it meets what is
             // below -- came out rounded on all four.
-            if let Some(corners) = parse_corner_radii(value, parent_font_size) {
+            if let Some(corners) = parse_corner_radii(value, parent_font_size_mpx) {
                 style.border_radius = corners;
             }
         }
         "border-top-left-radius" => {
-            if let Some(radius) = parse_corner_radius(value, parent_font_size) {
+            if let Some(radius) = parse_corner_radius(value, parent_font_size_mpx) {
                 style.border_radius.top_left = radius;
             }
         }
         "border-top-right-radius" => {
-            if let Some(radius) = parse_corner_radius(value, parent_font_size) {
+            if let Some(radius) = parse_corner_radius(value, parent_font_size_mpx) {
                 style.border_radius.top_right = radius;
             }
         }
         "border-bottom-right-radius" => {
-            if let Some(radius) = parse_corner_radius(value, parent_font_size) {
+            if let Some(radius) = parse_corner_radius(value, parent_font_size_mpx) {
                 style.border_radius.bottom_right = radius;
             }
         }
         "border-bottom-left-radius" => {
-            if let Some(radius) = parse_corner_radius(value, parent_font_size) {
+            if let Some(radius) = parse_corner_radius(value, parent_font_size_mpx) {
                 style.border_radius.bottom_left = radius;
             }
         }
         "outline" => {
-            parse_outline_shorthand(style, value, parent_font_size);
+            parse_outline_shorthand(style, value, parent_font_size_mpx);
         }
         "outline-width" => {
-            style.outline_width = parse_length(value, parent_font_size).unwrap_or(0);
+            style.outline_width = parse_length(value, parent_font_size_mpx).unwrap_or(0);
         }
         "outline-color" => {
             style.outline_color = parse_color(value);
         }
         "line-height" => {
-            style.line_height = parse_line_height(value, parent_font_size);
+            style.line_height = parse_line_height(value, parent_font_size_mpx);
         }
         "opacity" => {
             if let Ok(f) = value.trim().parse::<f32>() {
@@ -5513,7 +5557,7 @@ fn apply_declaration(style: &mut ComputedStyle, declaration: &Declaration, paren
             if v == "none" {
                 style.box_shadow = None;
             } else {
-                style.box_shadow = parse_box_shadow(value);
+                style.box_shadow = parse_box_shadow(value, style.font_size_mpx);
             }
         }
         "cursor" => {
@@ -5578,21 +5622,21 @@ fn apply_declaration(style: &mut ComputedStyle, declaration: &Declaration, paren
                         value: raw.to_string(),
                         important: declaration.important,
                     },
-                    parent_font_size,
+                    parent_font_size_mpx,
                 );
             }
         }
         "top" => {
-            style.top = parse_offset(value, parent_font_size);
+            style.top = parse_offset(value, parent_font_size_mpx);
         }
         "right" => {
-            style.right = parse_offset(value, parent_font_size);
+            style.right = parse_offset(value, parent_font_size_mpx);
         }
         "bottom" => {
-            style.bottom = parse_offset(value, parent_font_size);
+            style.bottom = parse_offset(value, parent_font_size_mpx);
         }
         "left" => {
-            style.left = parse_offset(value, parent_font_size);
+            style.left = parse_offset(value, parent_font_size_mpx);
         }
         "flex-direction" => {
             style.flex_direction = match value.trim().to_ascii_lowercase().as_str() {
@@ -5672,7 +5716,7 @@ fn apply_declaration(style: &mut ComputedStyle, declaration: &Declaration, paren
             if value.trim().to_ascii_lowercase() == "auto" {
                 style.flex_basis = None;
             } else {
-                style.flex_basis = parse_length_value(value, parent_font_size);
+                style.flex_basis = parse_length_value(value, parent_font_size_mpx);
             }
         }
         "flex" => {
@@ -5710,18 +5754,18 @@ fn apply_declaration(style: &mut ComputedStyle, declaration: &Declaration, paren
                             // `flex: <basis>`, e.g. `flex: 200px`.
                             style.flex_grow = 100;
                             style.flex_shrink = 100;
-                            style.flex_basis = parse_length_value(first, parent_font_size);
+                            style.flex_basis = parse_length_value(first, parent_font_size_mpx);
                         }
                     }
                     if parts.len() >= 2 {
                         if let Ok(shrink) = parts[1].parse::<f32>() {
                             style.flex_shrink = (shrink * 100.0).round() as u32;
                         } else {
-                            style.flex_basis = parse_length_value(parts[1], parent_font_size);
+                            style.flex_basis = parse_length_value(parts[1], parent_font_size_mpx);
                         }
                     }
                     if parts.len() >= 3 {
-                        style.flex_basis = parse_length_value(parts[2], parent_font_size);
+                        style.flex_basis = parse_length_value(parts[2], parent_font_size_mpx);
                     }
                 }
             }
@@ -5730,7 +5774,7 @@ fn apply_declaration(style: &mut ComputedStyle, declaration: &Declaration, paren
         // wins and a single value sets both -- which is how nearly every sheet
         // writes it.
         "row-gap" | "grid-row-gap" => {
-            if let Some(px) = parse_length(value.trim(), parent_font_size) {
+            if let Some(px) = parse_length(value.trim(), parent_font_size_mpx) {
                 style.gap = px;
             }
         }
@@ -5738,10 +5782,10 @@ fn apply_declaration(style: &mut ComputedStyle, declaration: &Declaration, paren
             let parts = split_value_components(value);
             let rows = parts
                 .first()
-                .and_then(|part| parse_length(part, parent_font_size));
+                .and_then(|part| parse_length(part, parent_font_size_mpx));
             let columns = parts
                 .get(1)
-                .and_then(|part| parse_length(part, parent_font_size))
+                .and_then(|part| parse_length(part, parent_font_size_mpx))
                 .or(rows);
             if let Some(px) = rows {
                 style.gap = px;
@@ -5753,21 +5797,21 @@ fn apply_declaration(style: &mut ComputedStyle, declaration: &Declaration, paren
         // A column gap on its own was dropped, so items written with only
         // `column-gap` sat flush against each other.
         "column-gap" | "grid-column-gap" => {
-            if let Some(px) = parse_length(value, parent_font_size) {
+            if let Some(px) = parse_length(value, parent_font_size_mpx) {
                 style.column_gap = px;
             }
         }
         // ── Grid properties ──────────────────────────────────────────────────
         "grid-template" => {
-            apply_grid_template(style, value, parent_font_size);
+            apply_grid_template(style, value, parent_font_size_mpx);
         }
         "grid-template-columns" => {
-            let (tracks, line_names) = parse_grid_track_list(value, parent_font_size);
+            let (tracks, line_names) = parse_grid_track_list(value, parent_font_size_mpx);
             style.grid_template_columns = tracks;
             set_grid_line_names(style, line_names, false);
         }
         "grid-template-rows" => {
-            let (tracks, line_names) = parse_grid_track_list(value, parent_font_size);
+            let (tracks, line_names) = parse_grid_track_list(value, parent_font_size_mpx);
             style.grid_template_rows = tracks;
             set_grid_line_names(style, line_names, true);
         }
@@ -5792,11 +5836,11 @@ fn apply_declaration(style: &mut ComputedStyle, declaration: &Declaration, paren
             }
         }
         "grid-auto-rows" => {
-            style.grid_auto_rows = parse_grid_track_size(value.trim(), parent_font_size)
+            style.grid_auto_rows = parse_grid_track_size(value.trim(), parent_font_size_mpx)
                 .unwrap_or(GridTrackSize::Auto);
         }
         "grid-auto-columns" => {
-            style.grid_auto_columns = parse_grid_track_size(value.trim(), parent_font_size)
+            style.grid_auto_columns = parse_grid_track_size(value.trim(), parent_font_size_mpx)
                 .unwrap_or(GridTrackSize::Auto);
         }
         "grid-template-areas" => {
@@ -5872,7 +5916,7 @@ fn apply_declaration(style: &mut ComputedStyle, declaration: &Declaration, paren
             if v.to_ascii_lowercase() == "none" {
                 style.text_shadow = None;
             } else {
-                style.text_shadow = parse_text_shadow(v, parent_font_size);
+                style.text_shadow = parse_text_shadow(v, parent_font_size_mpx);
             }
         }
         "transform" => {
@@ -6151,7 +6195,7 @@ fn default_margin(tag_name: &str) -> SignedEdgeSizes {
 // Legacy HTML attributes
 // ─────────────────────────────────────────────────────────────────────────────
 
-fn apply_legacy_attributes(style: &mut ComputedStyle, element: &Element, parent_font_size: u32) {
+fn apply_legacy_attributes(style: &mut ComputedStyle, element: &Element, parent_font_size_mpx: u32) {
     // `open` is what unfolds a `<details>`; its value does not matter, only
     // whether it is written at all.
     if element.tag_name == "details" && element.attribute("open").is_none() {
@@ -6180,14 +6224,14 @@ fn apply_legacy_attributes(style: &mut ComputedStyle, element: &Element, parent_
 
     if let Some(width) = element
         .attribute("width")
-        .and_then(|value| parse_length_value(value, parent_font_size))
+        .and_then(|value| parse_length_value(value, parent_font_size_mpx))
     {
         style.width = Some(width);
     }
 
     if let Some(height) = element
         .attribute("height")
-        .and_then(|value| parse_length_value(value, parent_font_size))
+        .and_then(|value| parse_length_value(value, parent_font_size_mpx))
     {
         style.height = Some(height);
     }
@@ -6223,9 +6267,9 @@ fn apply_legacy_attributes(style: &mut ComputedStyle, element: &Element, parent_
         }
 
         if let Some(size) = element.attribute("size")
-            && let Some(font_size_px) = parse_legacy_font_size(size, parent_font_size)
+            && let Some(font_size_mpx) = parse_legacy_font_size(size, parent_font_size_mpx)
         {
-            style.font_size_px = font_size_px;
+            style.font_size_mpx = font_size_mpx;
         }
     }
 }
@@ -7080,16 +7124,16 @@ fn parse_display(input: &str) -> Option<Display> {
 /// first track is line 0 and a list of N tracks ends at line N.
 fn parse_grid_track_list(
     input: &str,
-    parent_font_size: u32,
+    parent_font_size_mpx: u32,
 ) -> (Vec<GridTrackSize>, Vec<(Box<str>, usize)>) {
-    fn push_token(token: &str, tracks: &mut Vec<GridTrackSize>, parent_font_size: u32) {
+    fn push_token(token: &str, tracks: &mut Vec<GridTrackSize>, parent_font_size_mpx: u32) {
         let token = token.trim();
         if token.is_empty() {
             return;
         }
         if token.starts_with("repeat(") {
-            tracks.extend(expand_grid_repeat(token, parent_font_size));
-        } else if let Some(size) = parse_grid_track_size(token, parent_font_size) {
+            tracks.extend(expand_grid_repeat(token, parent_font_size_mpx));
+        } else if let Some(size) = parse_grid_track_size(token, parent_font_size_mpx) {
             tracks.push(size);
         }
     }
@@ -7105,7 +7149,7 @@ fn parse_grid_track_list(
         let ch = chars[i];
         match ch {
             '[' if depth == 0 => {
-                push_token(&buf, &mut tracks, parent_font_size);
+                push_token(&buf, &mut tracks, parent_font_size_mpx);
                 buf.clear();
                 let mut inner = String::new();
                 i += 1;
@@ -7127,19 +7171,19 @@ fn parse_grid_track_list(
                 buf.push(ch);
             }
             ' ' | '\t' | '\n' | '\r' if depth == 0 => {
-                push_token(&buf, &mut tracks, parent_font_size);
+                push_token(&buf, &mut tracks, parent_font_size_mpx);
                 buf.clear();
             }
             _ => buf.push(ch),
         }
         i += 1;
     }
-    push_token(&buf, &mut tracks, parent_font_size);
+    push_token(&buf, &mut tracks, parent_font_size_mpx);
 
     (tracks, names)
 }
 
-fn expand_grid_repeat(token: &str, parent_font_size: u32) -> Vec<GridTrackSize> {
+fn expand_grid_repeat(token: &str, parent_font_size_mpx: u32) -> Vec<GridTrackSize> {
     let inner = token
         .strip_prefix("repeat(")
         .and_then(|s| s.strip_suffix(')'));
@@ -7158,14 +7202,14 @@ fn expand_grid_repeat(token: &str, parent_font_size: u32) -> Vec<GridTrackSize> 
     };
     // Names inside a `repeat()` are dropped: repeating a line name would need
     // per-repetition indices, and no page has needed it yet.
-    let (track_sizes, _line_names) = parse_grid_track_list(track_str.trim(), parent_font_size);
+    let (track_sizes, _line_names) = parse_grid_track_list(track_str.trim(), parent_font_size_mpx);
     if track_sizes.is_empty() {
         return Vec::new();
     }
     track_sizes.into_iter().cycle().take(count).collect()
 }
 
-fn parse_grid_track_size(token: &str, parent_font_size: u32) -> Option<GridTrackSize> {
+fn parse_grid_track_size(token: &str, parent_font_size_mpx: u32) -> Option<GridTrackSize> {
     let t = token.trim().to_ascii_lowercase();
 
     // `minmax(min, max)`. We do not model a two-sided track, so take the max:
@@ -7192,9 +7236,9 @@ fn parse_grid_track_size(token: &str, parent_font_size: u32) -> Option<GridTrack
             }
         }
         return match comma {
-            Some(index) => parse_grid_track_size(&inner[index + 1..], parent_font_size)
-                .or_else(|| parse_grid_track_size(&inner[..index], parent_font_size)),
-            None => parse_grid_track_size(inner, parent_font_size),
+            Some(index) => parse_grid_track_size(&inner[index + 1..], parent_font_size_mpx)
+                .or_else(|| parse_grid_track_size(&inner[..index], parent_font_size_mpx)),
+            None => parse_grid_track_size(inner, parent_font_size_mpx),
         };
     }
 
@@ -7213,7 +7257,7 @@ fn parse_grid_track_size(token: &str, parent_font_size: u32) -> Option<GridTrack
     if let Some(n) = t.strip_suffix('%') {
         return parse_float(n).map(|f| GridTrackSize::Percent((f * 100.0).round() as u32));
     }
-    parse_length(&t, parent_font_size).map(GridTrackSize::Pixels)
+    parse_length(&t, parent_font_size_mpx).map(GridTrackSize::Pixels)
 }
 
 /// Record the line names one axis' track list produced.
@@ -7266,7 +7310,7 @@ fn strip_quoted_strings(input: &str) -> String {
 /// (`grid-template: min-content 1fr min-content / 12.25rem minmax(0,1fr)`), so
 /// without it the areas resolve but every column is the same width and the
 /// article lands in the sidebar's half of the page.
-fn apply_grid_template(style: &mut ComputedStyle, value: &str, parent_font_size: u32) {
+fn apply_grid_template(style: &mut ComputedStyle, value: &str, parent_font_size_mpx: u32) {
     let value = value.trim();
     if value.is_empty() || value.eq_ignore_ascii_case("none") {
         return;
@@ -7304,17 +7348,17 @@ fn apply_grid_template(style: &mut ComputedStyle, value: &str, parent_font_size:
     if rows_src.contains('"') || rows_src.contains('\'') {
         style.grid_template_areas = parse_grid_template_areas(rows_src).map(Box::new);
         let sizes = strip_quoted_strings(rows_src);
-        let (tracks, names) = parse_grid_track_list(&sizes, parent_font_size);
+        let (tracks, names) = parse_grid_track_list(&sizes, parent_font_size_mpx);
         style.grid_template_rows = tracks;
         set_grid_line_names(style, names, true);
     } else {
-        let (tracks, names) = parse_grid_track_list(rows_src, parent_font_size);
+        let (tracks, names) = parse_grid_track_list(rows_src, parent_font_size_mpx);
         style.grid_template_rows = tracks;
         set_grid_line_names(style, names, true);
     }
 
     if let Some(cols_src) = cols_src {
-        let (tracks, names) = parse_grid_track_list(cols_src, parent_font_size);
+        let (tracks, names) = parse_grid_track_list(cols_src, parent_font_size_mpx);
         style.grid_template_columns = tracks;
         set_grid_line_names(style, names, false);
     }
@@ -7803,7 +7847,7 @@ fn ease(t: f32, timing: TimingFunction) -> f32 {
 
 /// One corner's radius. A corner may be written as two lengths -- the
 /// horizontal one and the vertical one -- and only the horizontal is kept.
-fn parse_corner_radius(value: &str, parent_font_size: u32) -> Option<CornerRadius> {
+fn parse_corner_radius(value: &str, parent_font_size_mpx: u32) -> Option<CornerRadius> {
     let first = value.split_whitespace().next()?;
     if let Some(percent) = first.strip_suffix('%') {
         // Checked before the general length parser, which reads a bare `50%`
@@ -7812,17 +7856,17 @@ fn parse_corner_radius(value: &str, parent_font_size: u32) -> Option<CornerRadiu
             CornerRadius::Percent(p.max(0.0).round() as u32)
         });
     }
-    parse_length(first, parent_font_size).map(CornerRadius::Pixels)
+    parse_length(first, parent_font_size_mpx).map(CornerRadius::Pixels)
 }
 
 /// `border-radius`, in any of the shapes CSS allows: one to four lengths going
 /// round from the top-left, each missing one taken from the corner opposite.
-fn parse_corner_radii(value: &str, parent_font_size: u32) -> Option<Corners> {
+fn parse_corner_radii(value: &str, parent_font_size_mpx: u32) -> Option<Corners> {
     // Anything after `/` is the vertical radii, which are not modelled.
     let horizontal = value.split('/').next().unwrap_or(value).trim();
     let lengths: Vec<CornerRadius> = horizontal
         .split_whitespace()
-        .map(|part| parse_corner_radius(part, parent_font_size).unwrap_or(CornerRadius::Zero))
+        .map(|part| parse_corner_radius(part, parent_font_size_mpx).unwrap_or(CornerRadius::Zero))
         .collect();
     match lengths.len() {
         1 => Some(Corners {
@@ -7971,7 +8015,7 @@ fn parse_list_style_type(input: &str) -> ListStyleType {
     ListStyleType::Disc
 }
 
-fn parse_box_shadow(value: &str) -> Option<BoxShadow> {
+fn parse_box_shadow(value: &str, font_size_mpx: u32) -> Option<BoxShadow> {
     let v = value.trim();
     if v.to_ascii_lowercase() == "none" {
         return None;
@@ -8009,7 +8053,7 @@ fn parse_box_shadow(value: &str) -> Option<BoxShadow> {
         // Note: parse_signed_length uses a hardcoded font-size of 16px,
         // so `em`/`rem` units in box-shadow offsets resolve against 16px rather
         // than the element's actual font size. This is a known approximation.
-        if let Some(val) = parse_signed_length(token, 16) {
+        if let Some(val) = parse_signed_length(token, font_size_mpx) {
             match length_count {
                 0 => offset_x = val,
                 1 => offset_y = val,
@@ -8034,7 +8078,7 @@ fn parse_box_shadow(value: &str) -> Option<BoxShadow> {
     })
 }
 
-fn parse_line_height(input: &str, parent_font_size: u32) -> u32 {
+fn parse_line_height(input: &str, parent_font_size_mpx: u32) -> u32 {
     let v = input.trim().to_ascii_lowercase();
     if v == "normal" {
         return 0;
@@ -8046,12 +8090,16 @@ fn parse_line_height(input: &str, parent_font_size: u32) -> u32 {
     // px
     if let Some(rest) = v.strip_suffix("px") {
         if let Some(px) = parse_float(rest) {
-            // store as em thousandths relative to parent_font_size
-            let em = if parent_font_size > 0 {
-                px / parent_font_size as f32
+            // store as em thousandths relative to parent_font_size_mpx
+            // `line-height` is kept as a ratio in thousandths, so a length
+            // has to be divided by the font size it sits on -- in pixels, not
+            // in thousandths of one.
+            let basis = if parent_font_size_mpx > 0 {
+                mpx_to_f32(parent_font_size_mpx)
             } else {
-                px / 16.0
+                mpx_to_f32(INITIAL_FONT_SIZE_MPX)
             };
+            let em = px / basis;
             return (em * 1000.0).round() as u32;
         }
     }
@@ -8071,7 +8119,7 @@ fn parse_line_height(input: &str, parent_font_size: u32) -> u32 {
 }
 
 /// Parse a border shorthand like "1px solid red" or "none"
-fn parse_border_shorthand(style: &mut ComputedStyle, value: &str, parent_font_size: u32) {
+fn parse_border_shorthand(style: &mut ComputedStyle, value: &str, parent_font_size_mpx: u32) {
     let v = value.trim().to_ascii_lowercase();
     if v == "none" || v == "0" {
         style.border = EdgeSizes::default();
@@ -8091,7 +8139,7 @@ fn parse_border_shorthand(style: &mut ComputedStyle, value: &str, parent_font_si
             style.border_style_none = false;
             continue;
         }
-        if let Some(px) = parse_length(token, parent_font_size) {
+        if let Some(px) = parse_length(token, parent_font_size_mpx) {
             style.border = EdgeSizes::all(px);
             continue;
         }
@@ -8113,7 +8161,7 @@ fn parse_border_shorthand(style: &mut ComputedStyle, value: &str, parent_font_si
 fn parse_border_side_shorthand(
     style: &mut ComputedStyle,
     value: &str,
-    parent_font_size: u32,
+    parent_font_size_mpx: u32,
     side: &str,
 ) {
     let v = value.trim().to_ascii_lowercase();
@@ -8138,7 +8186,7 @@ fn parse_border_side_shorthand(
             style.border_style_none = false;
             continue;
         }
-        if let Some(px) = parse_length(token, parent_font_size) {
+        if let Some(px) = parse_length(token, parent_font_size_mpx) {
             set_width(style, px);
             continue;
         }
@@ -8160,7 +8208,7 @@ fn parse_border_side_shorthand(
     }
 }
 
-fn parse_outline_shorthand(style: &mut ComputedStyle, value: &str, parent_font_size: u32) {
+fn parse_outline_shorthand(style: &mut ComputedStyle, value: &str, parent_font_size_mpx: u32) {
     let v = value.trim().to_ascii_lowercase();
     if v == "none" {
         style.outline_width = 0;
@@ -8170,7 +8218,7 @@ fn parse_outline_shorthand(style: &mut ComputedStyle, value: &str, parent_font_s
         if matches!(token, "solid" | "dashed" | "dotted" | "none") {
             continue;
         }
-        if let Some(px) = parse_length(token, parent_font_size) {
+        if let Some(px) = parse_length(token, parent_font_size_mpx) {
             style.outline_width = px;
             continue;
         }
@@ -8181,7 +8229,7 @@ fn parse_outline_shorthand(style: &mut ComputedStyle, value: &str, parent_font_s
 }
 
 /// Parse `font` shorthand: "bold 16px/1.5 sans-serif" or "italic bold 14px Arial"
-fn parse_font_shorthand(style: &mut ComputedStyle, value: &str, parent_font_size: u32) {
+fn parse_font_shorthand(style: &mut ComputedStyle, value: &str, parent_font_size_mpx: u32) {
     let v = value.trim().to_ascii_lowercase();
     // Split by whitespace, handle size/line-height together
     let tokens: Vec<&str> = v.split_whitespace().collect();
@@ -8200,17 +8248,17 @@ fn parse_font_shorthand(style: &mut ComputedStyle, value: &str, parent_font_size
         // size/line-height
         if token.contains('/') {
             let parts: Vec<&str> = token.splitn(2, '/').collect();
-            if let Some(size) = parse_font_size(parts[0], parent_font_size) {
-                style.font_size_px = size.max(8);
+            if let Some(size) = parse_font_size(parts[0], parent_font_size_mpx) {
+                style.font_size_mpx = size.max(8 * MPX);
             }
             if parts.len() > 1 {
-                style.line_height = parse_line_height(parts[1], style.font_size_px);
+                style.line_height = parse_line_height(parts[1], style.font_size_mpx);
             }
             continue;
         }
         // plain size
-        if let Some(size) = parse_font_size(token, parent_font_size) {
-            style.font_size_px = size.max(8);
+        if let Some(size) = parse_font_size(token, parent_font_size_mpx) {
+            style.font_size_mpx = size.max(8 * MPX);
             continue;
         }
         // Everything from here on is the family list, and it is read whole:
@@ -8225,7 +8273,7 @@ fn parse_font_shorthand(style: &mut ComputedStyle, value: &str, parent_font_size
     }
 }
 
-fn parse_margin_shorthand(style: &mut ComputedStyle, input: &str, parent_font_size: u32) {
+fn parse_margin_shorthand(style: &mut ComputedStyle, input: &str, parent_font_size_mpx: u32) {
     // Reset auto flags
     style.margin_left_auto = false;
     style.margin_right_auto = false;
@@ -8238,7 +8286,7 @@ fn parse_margin_shorthand(style: &mut ComputedStyle, input: &str, parent_font_si
             if t.to_ascii_lowercase() == "auto" {
                 None // auto
             } else {
-                parse_length_signed(t, parent_font_size)
+                parse_length_signed(t, parent_font_size_mpx)
             }
         })
         .collect();
@@ -8291,10 +8339,10 @@ fn parse_margin_shorthand(style: &mut ComputedStyle, input: &str, parent_font_si
     }
 }
 
-fn parse_box_shorthand(input: &str, parent_font_size: u32) -> Option<EdgeSizes> {
+fn parse_box_shorthand(input: &str, parent_font_size_mpx: u32) -> Option<EdgeSizes> {
     let values = input
         .split_whitespace()
-        .filter_map(|part| parse_length(part, parent_font_size))
+        .filter_map(|part| parse_length(part, parent_font_size_mpx))
         .collect::<Vec<_>>();
 
     match values.as_slice() {
@@ -8321,37 +8369,37 @@ fn parse_box_shorthand(input: &str, parent_font_size: u32) -> Option<EdgeSizes> 
     }
 }
 
-fn parse_font_size(input: &str, parent_font_size: u32) -> Option<u32> {
+fn parse_font_size(input: &str, parent_font_size_mpx: u32) -> Option<u32> {
     let value = input.trim().to_ascii_lowercase();
     match value.as_str() {
-        "xx-small" => Some(9),
-        "x-small" => Some(10),
-        "small" => Some(13),
-        "medium" => Some(16),
-        "large" => Some(20),
-        "x-large" => Some(24),
-        "xx-large" => Some(32),
-        "smaller" => Some(parent_font_size.saturating_sub(2).max(8)),
-        "larger" => Some(parent_font_size.saturating_add(2)),
-        _ => parse_length(&value, parent_font_size),
+        "xx-small" => Some(9 * MPX),
+        "x-small" => Some(10 * MPX),
+        "small" => Some(13 * MPX),
+        "medium" => Some(16 * MPX),
+        "large" => Some(20 * MPX),
+        "x-large" => Some(24 * MPX),
+        "xx-large" => Some(32 * MPX),
+        "smaller" => Some(parent_font_size_mpx.saturating_sub(2 * MPX).max(8 * MPX)),
+        "larger" => Some(parent_font_size_mpx.saturating_add(2 * MPX)),
+        _ => parse_length_mpx(&value, parent_font_size_mpx),
     }
 }
 
-fn parse_legacy_font_size(input: &str, parent_font_size: u32) -> Option<u32> {
+fn parse_legacy_font_size(input: &str, parent_font_size_mpx: u32) -> Option<u32> {
     match input.trim() {
-        "1" => Some(10),
-        "2" => Some(13),
-        "3" => Some(16),
-        "4" => Some(18),
-        "5" => Some(24),
-        "6" => Some(32),
-        "7" => Some(48),
+        "1" => Some(10 * MPX),
+        "2" => Some(13 * MPX),
+        "3" => Some(16 * MPX),
+        "4" => Some(18 * MPX),
+        "5" => Some(24 * MPX),
+        "6" => Some(32 * MPX),
+        "7" => Some(48 * MPX),
         value if value.starts_with('+') || value.starts_with('-') => {
             let delta = value.parse::<i32>().ok()?;
-            let adjusted = parent_font_size as i32 + delta * 2;
-            Some(adjusted.max(8) as u32)
+            let adjusted = parent_font_size_mpx as i64 + delta as i64 * 2 * MPX as i64;
+            Some(adjusted.clamp(8 * MPX as i64, u32::MAX as i64) as u32)
         }
-        _ => parse_font_size(input, parent_font_size),
+        _ => parse_font_size(input, parent_font_size_mpx),
     }
 }
 
@@ -8446,10 +8494,10 @@ fn split_css_fn_args(expr: &str) -> Vec<&str> {
 }
 
 /// CSS `min(a, b, ...)` / `max(a, b, ...)` resolver (is_max=true for max).
-fn parse_css_min_max(expr: &str, parent_font_size: u32, is_max: bool) -> Option<u32> {
+fn parse_css_min_max(expr: &str, parent_font_size_mpx: u32, is_max: bool) -> Option<u32> {
     let mut result: Option<u32> = None;
     for arg in split_css_fn_args(expr) {
-        if let Some(v) = parse_length(arg.trim(), parent_font_size) {
+        if let Some(v) = parse_length(arg.trim(), parent_font_size_mpx) {
             result = Some(match result {
                 None => v,
                 Some(r) => {
@@ -8466,50 +8514,60 @@ fn parse_css_min_max(expr: &str, parent_font_size: u32, is_max: bool) -> Option<
 }
 
 /// CSS `clamp(min, val, max)` resolver.
-fn parse_css_clamp(expr: &str, parent_font_size: u32) -> Option<u32> {
+fn parse_css_clamp(expr: &str, parent_font_size_mpx: u32) -> Option<u32> {
     let args = split_css_fn_args(expr);
     if args.len() != 3 {
         return None;
     }
-    let lo = parse_length(args[0].trim(), parent_font_size)? as f32;
-    let val = parse_length(args[1].trim(), parent_font_size)? as f32;
-    let hi = parse_length(args[2].trim(), parent_font_size)? as f32;
+    let lo = parse_length(args[0].trim(), parent_font_size_mpx)? as f32;
+    let val = parse_length(args[1].trim(), parent_font_size_mpx)? as f32;
+    let hi = parse_length(args[2].trim(), parent_font_size_mpx)? as f32;
     Some(val.clamp(lo, hi).round() as u32)
 }
 
 /// Parse a CSS length. Handles calc(), clamp(), min(), max(), vw/vh, px, em, rem, %
-pub fn parse_length(input: &str, parent_font_size: u32) -> Option<u32> {
+/// A CSS length in whole pixels, which is what layout works in.
+pub fn parse_length(input: &str, parent_font_size_mpx: u32) -> Option<u32> {
+    parse_length_mpx(input, parent_font_size_mpx).map(mpx_to_px)
+}
+
+/// The same length in [`MPX`]ths of a pixel. `font-size` keeps this
+/// precision -- `0.8333em` of 16px is 13333, not 13 -- and everything else
+/// rounds to whole pixels on the way out.
+pub fn parse_length_mpx(input: &str, parent_font_size_mpx: u32) -> Option<u32> {
     let value = input.trim().to_ascii_lowercase();
     if value == "0" {
         return Some(0);
     }
 
-    // calc()
+    // calc() and its friends work in whole pixels and are scaled back up
+    // here: `calc(1rem + 2px)` as a font size loses the fraction, which no
+    // page has yet been seen to depend on.
     if let Some(inner) = value
         .strip_prefix("calc(")
         .and_then(|s| s.strip_suffix(')'))
     {
-        return parse_calc(inner, parent_font_size);
+        return parse_calc(inner, parent_font_size_mpx).map(px_to_mpx);
     }
-
-    // min()
     if let Some(inner) = value.strip_prefix("min(").and_then(|s| s.strip_suffix(')')) {
-        return parse_css_min_max(inner, parent_font_size, false);
+        return parse_css_min_max(inner, parent_font_size_mpx, false).map(px_to_mpx);
     }
-    // max()
     if let Some(inner) = value.strip_prefix("max(").and_then(|s| s.strip_suffix(')')) {
-        return parse_css_min_max(inner, parent_font_size, true);
+        return parse_css_min_max(inner, parent_font_size_mpx, true).map(px_to_mpx);
     }
-    // clamp()
     if let Some(inner) = value
         .strip_prefix("clamp(")
         .and_then(|s| s.strip_suffix(')'))
     {
-        return parse_css_clamp(inner, parent_font_size);
+        return parse_css_clamp(inner, parent_font_size_mpx).map(px_to_mpx);
     }
 
+    let scale = |factor: f32| {
+        move |p: f32| (p * factor * MPX as f32).round().max(0.0) as u32
+    };
+
     if let Some(number) = value.strip_suffix("px") {
-        return parse_float(number).map(|p| p.round().max(0.0) as u32);
+        return parse_float(number).map(scale(1.0));
     }
 
     // The absolute units. Every one of them is a fixed multiple of the pixel:
@@ -8532,27 +8590,29 @@ pub fn parse_length(input: &str, parent_font_size: u32) -> Option<u32> {
         if let Some(number) = value.strip_suffix(suffix) {
             // Only if what is left really is a number: `thin` ends in `in`.
             if let Some(parsed) = parse_float(number) {
-                return Some((parsed * per_unit).round().max(0.0) as u32);
+                return Some(scale(per_unit)(parsed));
             }
         }
     }
 
     if let Some(number) = value.strip_suffix("vw") {
-        return parse_float(number).map(|p| (p * 1280.0 / 100.0).round() as u32);
+        return parse_float(number).map(scale(1280.0 / 100.0));
     }
 
     if let Some(number) = value.strip_suffix("vh") {
-        return parse_float(number).map(|p| (p * 800.0 / 100.0).round() as u32); // viewport 800px tall — must match js.rs innerHeight
+        // viewport 800px tall -- must match js.rs innerHeight
+        return parse_float(number).map(scale(800.0 / 100.0));
     }
 
     // rem must be checked before em
     if let Some(number) = value.strip_suffix("rem") {
-        let root = root_font_size() as f32;
-        return parse_float(number).map(|p| (p * root).round() as u32);
+        let root = root_font_size_mpx() as f32;
+        return parse_float(number).map(|p| (p * root).round().max(0.0) as u32);
     }
 
     if let Some(number) = value.strip_suffix("em") {
-        return parse_float(number).map(|p| (p * parent_font_size as f32).round() as u32);
+        return parse_float(number)
+            .map(|p| (p * parent_font_size_mpx as f32).round().max(0.0) as u32);
     }
 
     // `ch` is the width of a "0" and `ex` the height of an "x", both of which
@@ -8565,17 +8625,19 @@ pub fn parse_length(input: &str, parent_font_size: u32) -> Option<u32> {
         .strip_suffix("ch")
         .or_else(|| value.strip_suffix("ex"))
     {
-        return parse_float(number).map(|p| (p * parent_font_size as f32 / 2.0).round() as u32);
+        return parse_float(number)
+            .map(|p| (p * parent_font_size_mpx as f32 / 2.0).round().max(0.0) as u32);
     }
 
     if let Some(number) = value.strip_suffix('%') {
-        return parse_float(number).map(|p| ((p / 100.0) * parent_font_size as f32).round() as u32);
+        return parse_float(number)
+            .map(|p| ((p / 100.0) * parent_font_size_mpx as f32).round().max(0.0) as u32);
     }
 
-    parse_float(&value).map(|p| p.round().max(0.0) as u32)
+    parse_float(&value).map(scale(1.0))
 }
 
-fn parse_length_signed(input: &str, parent_font_size: u32) -> Option<i32> {
+fn parse_length_signed(input: &str, parent_font_size_mpx: u32) -> Option<i32> {
     let value = input.trim().to_ascii_lowercase();
     if value == "0" {
         return Some(0);
@@ -8583,20 +8645,20 @@ fn parse_length_signed(input: &str, parent_font_size: u32) -> Option<i32> {
 
     if value.starts_with('-') {
         let positive = &value[1..];
-        let px = parse_length(positive, parent_font_size)?.min(i32::MAX as u32) as i32;
+        let px = parse_length(positive, parent_font_size_mpx)?.min(i32::MAX as u32) as i32;
         return Some(-px);
     }
 
     // Clamp to i32::MAX before casting so pathological lengths (>= 2^31 px) don't wrap.
-    parse_length(input, parent_font_size).map(|v| v.min(i32::MAX as u32) as i32)
+    parse_length(input, parent_font_size_mpx).map(|v| v.min(i32::MAX as u32) as i32)
 }
 
-fn parse_signed_length(input: &str, parent_font_size: u32) -> Option<i32> {
-    parse_length_signed(input, parent_font_size)
+fn parse_signed_length(input: &str, parent_font_size_mpx: u32) -> Option<i32> {
+    parse_length_signed(input, parent_font_size_mpx)
 }
 
 /// Simple calc() evaluator: left-to-right, no precedence.
-fn parse_calc(expr: &str, parent_font_size: u32) -> Option<u32> {
+fn parse_calc(expr: &str, parent_font_size_mpx: u32) -> Option<u32> {
     let expr = expr.trim();
 
     // Tokenize: collect (operator, f32_value) pairs.
@@ -8627,14 +8689,14 @@ fn parse_calc(expr: &str, parent_font_size: u32) -> Option<u32> {
             // whole calc() was discarded. MDN writes its breakpoints this way.
             '+' | '*' | '/' if depth == 0 => {
                 if !buf.trim().is_empty() {
-                    values.push(resolve_calc_operand_f32(buf.trim(), parent_font_size)?);
+                    values.push(resolve_calc_operand_f32(buf.trim(), parent_font_size_mpx)?);
                     buf.clear();
                 }
                 ops.push(ch);
                 i += 1;
             }
             '-' if depth == 0 && !buf.trim().is_empty() => {
-                values.push(resolve_calc_operand_f32(buf.trim(), parent_font_size)?);
+                values.push(resolve_calc_operand_f32(buf.trim(), parent_font_size_mpx)?);
                 buf.clear();
                 ops.push('-');
                 i += 1;
@@ -8646,7 +8708,7 @@ fn parse_calc(expr: &str, parent_font_size: u32) -> Option<u32> {
         }
     }
     if !buf.trim().is_empty() {
-        values.push(resolve_calc_operand_f32(buf.trim(), parent_font_size)?);
+        values.push(resolve_calc_operand_f32(buf.trim(), parent_font_size_mpx)?);
     }
 
     if values.is_empty() {
@@ -8690,7 +8752,7 @@ fn parse_calc(expr: &str, parent_font_size: u32) -> Option<u32> {
     Some(result.round().max(0.0) as u32)
 }
 
-fn resolve_calc_operand_f32(token: &str, parent_font_size: u32) -> Option<f32> {
+fn resolve_calc_operand_f32(token: &str, parent_font_size_mpx: u32) -> Option<f32> {
     let t = token.trim().to_ascii_lowercase();
     // Plain number used as multiplier in * or /
     if let Ok(f) = t.parse::<f32>() {
@@ -8698,17 +8760,17 @@ fn resolve_calc_operand_f32(token: &str, parent_font_size: u32) -> Option<f32> {
     }
     // A parenthesised group is its own calc() body.
     if let Some(inner) = t.strip_prefix('(').and_then(|s| s.strip_suffix(')')) {
-        return parse_calc(inner, parent_font_size).map(|v| v as f32);
+        return parse_calc(inner, parent_font_size_mpx).map(|v| v as f32);
     }
     // nested min()/max()/clamp() inside calc()
     if let Some(inner) = t.strip_prefix("min(").and_then(|s| s.strip_suffix(')')) {
-        return parse_css_min_max(inner, parent_font_size, false).map(|v| v as f32);
+        return parse_css_min_max(inner, parent_font_size_mpx, false).map(|v| v as f32);
     }
     if let Some(inner) = t.strip_prefix("max(").and_then(|s| s.strip_suffix(')')) {
-        return parse_css_min_max(inner, parent_font_size, true).map(|v| v as f32);
+        return parse_css_min_max(inner, parent_font_size_mpx, true).map(|v| v as f32);
     }
     if let Some(inner) = t.strip_prefix("clamp(").and_then(|s| s.strip_suffix(')')) {
-        return parse_css_clamp(inner, parent_font_size).map(|v| v as f32);
+        return parse_css_clamp(inner, parent_font_size_mpx).map(|v| v as f32);
     }
     if let Some(n) = t.strip_suffix("px") {
         return parse_float(n);
@@ -8717,10 +8779,10 @@ fn resolve_calc_operand_f32(token: &str, parent_font_size: u32) -> Option<f32> {
     // `30rem` into `30r`, which then fails to parse and takes the whole calc()
     // down with it. Every `calc()` containing a rem was silently discarded.
     if let Some(n) = t.strip_suffix("rem") {
-        return parse_float(n).map(|f| f * 16.0);
+        return parse_float(n).map(|f| f * mpx_to_f32(root_font_size_mpx()));
     }
     if let Some(n) = t.strip_suffix("em") {
-        return parse_float(n).map(|f| f * parent_font_size as f32);
+        return parse_float(n).map(|f| f * mpx_to_f32(parent_font_size_mpx));
     }
     if let Some(n) = t.strip_suffix("vw") {
         return parse_float(n).map(|f| f * 12.8); // viewport 1280px wide
@@ -8729,7 +8791,7 @@ fn resolve_calc_operand_f32(token: &str, parent_font_size: u32) -> Option<f32> {
         return parse_float(n).map(|f| f * 8.0); // viewport 800px tall (matches parse_length)
     }
     if let Some(n) = t.strip_suffix('%') {
-        return parse_float(n).map(|f| f * parent_font_size as f32 / 100.0);
+        return parse_float(n).map(|f| f * mpx_to_f32(parent_font_size_mpx) / 100.0);
     }
     None
 }
@@ -8744,7 +8806,7 @@ pub fn resolve_calc(percent_hundredths: i32, px: i32, basis: u32) -> u32 {
 /// Returns `None` for anything that does not fit that shape -- other units,
 /// multiplication, nesting -- leaving those to the font-size-relative evaluator
 /// that handles the general case.
-fn parse_calc_length_value(expr: &str, parent_font_size: u32) -> Option<LengthValue> {
+fn parse_calc_length_value(expr: &str, parent_font_size_mpx: u32) -> Option<LengthValue> {
     // `var()` is substituted before we get here, so a leftover paren means a
     // nested function we do not model.
     if expr.contains('(') {
@@ -8771,7 +8833,7 @@ fn parse_calc_length_value(expr: &str, parent_font_size: u32) -> Option<LengthVa
             expect_operator = false;
             continue;
         }
-        let (term_percent, term_px) = parse_calc_term(token, parent_font_size)?;
+        let (term_percent, term_px) = parse_calc_term(token, parent_font_size_mpx)?;
         percent_hundredths += sign * term_percent;
         px += sign * term_px;
         expect_operator = true;
@@ -8824,7 +8886,7 @@ fn collapse_spaces_around_muldiv(expr: &str) -> String {
 ///
 /// A term is at most one length or percentage, scaled by any number of plain
 /// numbers: `2px*2`, `35rem*-1/4`, `100%`.
-fn parse_calc_term(token: &str, parent_font_size: u32) -> Option<(f32, f32)> {
+fn parse_calc_term(token: &str, parent_font_size_mpx: u32) -> Option<(f32, f32)> {
     // Split into factors, keeping the operator that preceded each one.
     let mut factors: Vec<(char, &str)> = Vec::new();
     let mut operator = '*';
@@ -8842,7 +8904,7 @@ fn parse_calc_term(token: &str, parent_font_size: u32) -> Option<(f32, f32)> {
     let mut length: Option<(f32, f32)> = None;
 
     for (operator, raw) in factors {
-        match parse_calc_factor(raw, parent_font_size)? {
+        match parse_calc_factor(raw, parent_font_size_mpx)? {
             CalcFactor::Number(n) => match operator {
                 '*' => scale *= n,
                 '/' if n != 0.0 => scale /= n,
@@ -8873,7 +8935,7 @@ enum CalcFactor {
     Length(f32, f32),
 }
 
-fn parse_calc_factor(token: &str, parent_font_size: u32) -> Option<CalcFactor> {
+fn parse_calc_factor(token: &str, parent_font_size_mpx: u32) -> Option<CalcFactor> {
     let token = token.trim().to_ascii_lowercase();
     if token.is_empty() {
         return None;
@@ -8888,13 +8950,13 @@ fn parse_calc_factor(token: &str, parent_font_size: u32) -> Option<CalcFactor> {
     if let Some(number) = token.strip_suffix("rem") {
         return Some(CalcFactor::Length(
             0.0,
-            parse_float(number)? * root_font_size() as f32,
+            parse_float(number)? * mpx_to_f32(root_font_size_mpx()),
         ));
     }
     if let Some(number) = token.strip_suffix("em") {
         return Some(CalcFactor::Length(
             0.0,
-            parse_float(number)? * parent_font_size as f32,
+            parse_float(number)? * mpx_to_f32(parent_font_size_mpx),
         ));
     }
     parse_float(&token).map(CalcFactor::Number)
@@ -8907,7 +8969,7 @@ fn parse_calc_factor(token: &str, parent_font_size: u32) -> Option<CalcFactor> {
 /// of half its width. Resolving that percentage here against the font size made
 /// Yahoo! JAPAN's masthead logo `left: 7px` instead of `left: 495px`, so it sat
 /// against the left edge of the page with its negative margin still applied.
-fn parse_offset(input: &str, parent_font_size: u32) -> Option<LengthValue> {
+fn parse_offset(input: &str, parent_font_size_mpx: u32) -> Option<LengthValue> {
     let value = input.trim().to_ascii_lowercase();
     if value == "auto" {
         return None;
@@ -8915,7 +8977,7 @@ fn parse_offset(input: &str, parent_font_size: u32) -> Option<LengthValue> {
     if let Some(inner) = value
         .strip_prefix("calc(")
         .and_then(|s| s.strip_suffix(')'))
-        && let Some(length) = parse_calc_length_value(inner, parent_font_size)
+        && let Some(length) = parse_calc_length_value(inner, parent_font_size_mpx)
     {
         return Some(length);
     }
@@ -8926,7 +8988,7 @@ fn parse_offset(input: &str, parent_font_size: u32) -> Option<LengthValue> {
             px: 0,
         });
     }
-    let pixels = parse_length_signed(&value, parent_font_size)?;
+    let pixels = parse_length_signed(&value, parent_font_size_mpx)?;
     Some(if pixels >= 0 {
         LengthValue::Pixels(pixels as u32)
     } else {
@@ -8939,7 +9001,7 @@ fn parse_offset(input: &str, parent_font_size: u32) -> Option<LengthValue> {
     })
 }
 
-fn parse_length_value(input: &str, parent_font_size: u32) -> Option<LengthValue> {
+fn parse_length_value(input: &str, parent_font_size_mpx: u32) -> Option<LengthValue> {
     let value = input.trim().to_ascii_lowercase();
     match value.as_str() {
         "min-content" => return Some(LengthValue::MinContent),
@@ -8954,7 +9016,7 @@ fn parse_length_value(input: &str, parent_font_size: u32) -> Option<LengthValue>
     if let Some(inner) = value
         .strip_prefix("calc(")
         .and_then(|s| s.strip_suffix(')'))
-        && let Some(length) = parse_calc_length_value(inner, parent_font_size)
+        && let Some(length) = parse_calc_length_value(inner, parent_font_size_mpx)
     {
         return Some(length);
     }
@@ -8964,7 +9026,7 @@ fn parse_length_value(input: &str, parent_font_size: u32) -> Option<LengthValue>
         };
         let parts: Vec<(i32, i32)> = split_at_top_level(inner, ',')
             .iter()
-            .filter_map(|part| linear_length_form(part.trim(), parent_font_size))
+            .filter_map(|part| linear_length_form(part.trim(), parent_font_size_mpx))
             .collect();
         // `min()` and `max()` take any number of arguments; only the first two
         // are kept, which is what real stylesheets write.
@@ -8991,19 +9053,19 @@ fn parse_length_value(input: &str, parent_font_size: u32) -> Option<LengthValue>
         .strip_prefix("fit-content(")
         .and_then(|s| s.strip_suffix(')'))
     {
-        if let Some(px) = parse_length(inner, parent_font_size) {
+        if let Some(px) = parse_length(inner, parent_font_size_mpx) {
             return Some(LengthValue::FitContent(px));
         }
     }
     if let Some(number) = value.strip_suffix('%') {
         return parse_float(number).map(|p| LengthValue::Percent(p.round().max(0.0) as u32));
     }
-    parse_length(&value, parent_font_size).map(LengthValue::Pixels)
+    parse_length(&value, parent_font_size_mpx).map(LengthValue::Pixels)
 }
 
 /// One argument of `min()` / `max()` / `clamp()` as "a share of the containing
 /// block, plus an offset" -- the same shape `calc()` reduces to.
-fn linear_length_form(input: &str, parent_font_size: u32) -> Option<(i32, i32)> {
+fn linear_length_form(input: &str, parent_font_size_mpx: u32) -> Option<(i32, i32)> {
     let value = input.trim();
     if let Some(number) = value.strip_suffix('%') {
         let percent = parse_float(number)?;
@@ -9012,7 +9074,7 @@ fn linear_length_form(input: &str, parent_font_size: u32) -> Option<(i32, i32)> 
     if let Some(inner) = value
         .strip_prefix("calc(")
         .and_then(|rest| rest.strip_suffix(')'))
-        && let Some(length) = parse_calc_length_value(inner, parent_font_size)
+        && let Some(length) = parse_calc_length_value(inner, parent_font_size_mpx)
     {
         return match length {
             LengthValue::Pixels(px) => Some((0, px.min(i32::MAX as u32) as i32)),
@@ -9024,7 +9086,7 @@ fn linear_length_form(input: &str, parent_font_size: u32) -> Option<(i32, i32)> 
             _ => None,
         };
     }
-    parse_length_signed(value, parent_font_size).map(|px| (0, px))
+    parse_length_signed(value, parent_font_size_mpx).map(|px| (0, px))
 }
 
 fn parse_float(input: &str) -> Option<f32> {
@@ -9122,7 +9184,7 @@ fn find_url(value: &str) -> Option<String> {
 /// nothing at all and the icon was never drawn.
 /// `background-size: 10px`, `10px 20px`, `10px auto`. Returns `None` for
 /// anything else (a percentage, a keyword) so the caller can fall back.
-fn parse_background_size_lengths(value: &str, font_size_px: u32) -> Option<BackgroundSize> {
+fn parse_background_size_lengths(value: &str, font_size_mpx: u32) -> Option<BackgroundSize> {
     // A percentage here is a share of the BOX, which is not known at parse
     // time. `parse_length` would happily read it as a share of the font size
     // instead -- `background-size: 50%` came out as 8px. Leave it to `Auto`.
@@ -9130,7 +9192,7 @@ fn parse_background_size_lengths(value: &str, font_size_px: u32) -> Option<Backg
         if token.ends_with('%') {
             return None;
         }
-        parse_length(token, font_size_px)
+        parse_length(token, font_size_mpx)
     };
     let mut parts = value.split_whitespace();
     let first = parts.next()?;
@@ -9212,7 +9274,7 @@ fn apply_background_shorthand(style: &mut ComputedStyle, value: &str) {
             style.background_size = match right.trim() {
                 "cover" => BackgroundSize::Cover,
                 "contain" => BackgroundSize::Contain,
-                other => parse_background_size_lengths(other, style.font_size_px)
+                other => parse_background_size_lengths(other, style.font_size_mpx)
                     .unwrap_or(BackgroundSize::Auto),
             };
             continue;
@@ -9441,7 +9503,7 @@ fn extract_url(value: &str) -> Option<String> {
 }
 
 /// Parse a `text-shadow` value. Format: offset-x offset-y [blur] color.
-fn parse_text_shadow(value: &str, parent_font_size: u32) -> Option<TextShadow> {
+fn parse_text_shadow(value: &str, parent_font_size_mpx: u32) -> Option<TextShadow> {
     // Take only the first shadow (before any comma outside parens)
     let first_shadow = split_at_top_level(value, ',').into_iter().next()?;
     let tokens: Vec<String> = split_at_top_level(first_shadow.trim(), ' ')
@@ -9462,7 +9524,7 @@ fn parse_text_shadow(value: &str, parent_font_size: u32) -> Option<TextShadow> {
         if let Some(c) = parse_color(token) {
             color = c;
             found_color = true;
-        } else if let Some(px) = parse_signed_length(token, parent_font_size) {
+        } else if let Some(px) = parse_signed_length(token, parent_font_size_mpx) {
             lengths.push(px);
         }
     }
@@ -9627,7 +9689,7 @@ fn parse_linear_gradient(value: &str) -> Option<LinearGradient> {
         };
 
         let last_is_position =
-            last.ends_with('%') || (last.ends_with("px") && parse_length(last, 16).is_some());
+            last.ends_with('%') || (last.ends_with("px") && parse_length(last, INITIAL_FONT_SIZE_MPX).is_some());
         let second_last_is_position = second_last
             .map(|s| s.ends_with('%') || s.ends_with("px"))
             .unwrap_or(false);
@@ -9651,7 +9713,7 @@ fn parse_linear_gradient(value: &str) -> Option<LinearGradient> {
                         .ok()
                         .map(|v| (v * 10.0).round() as u32)
                 } else {
-                    parse_length(p, 16).map(|v| (v as f64 / 10.0).round() as u32) // rough conversion
+                    parse_length(p, INITIAL_FONT_SIZE_MPX).map(|v| (v as f64 / 10.0).round() as u32) // rough conversion
                 }
             });
             raw_stops.push((c, pos));
@@ -9696,6 +9758,7 @@ mod tests {
     use std::rc::Rc;
 
     use super::{
+        INITIAL_FONT_SIZE_MPX, MPX,
         AlignItems, Display, FlexDirection, FlexWrap, GridEdge, GridTrackSize, JustifyContent,
         LengthValue, Position, RuleIndex, StyledElement, StyledNode, TableRole, VerticalAlign,
         WhiteSpaceMode, build_styled_tree, compute_style, parse_calc, parse_color,
@@ -9874,7 +9937,11 @@ mod tests {
         );
         let sup = find_first_element(&styled, "sup").expect("the sup should exist");
         let sub = find_first_element(&styled, "sub").expect("the sub should exist");
-        assert_eq!(sup.style.font_size_px, 13);
+        assert_eq!(
+            sup.style.font_size_mpx,
+            132_800,
+            "83% of 16px, kept to the fraction rather than rounded to 13"
+        );
         assert!(sup.style.baseline_shift < 0, "a superscript is lifted");
         assert!(sub.style.baseline_shift > 0, "a subscript is dropped");
     }
@@ -9915,8 +9982,8 @@ mod tests {
         let down = by_id("down");
         assert!(up.style.baseline_shift < 0, "super lifts: {up:?}");
         assert!(down.style.baseline_shift > 0, "sub drops: {down:?}");
-        assert_eq!(up.style.font_size_px, 16, "the keyword leaves the size alone");
-        assert_eq!(down.style.font_size_px, 16);
+        assert_eq!(up.style.font_size_mpx, 16 * MPX, "the keyword leaves the size alone");
+        assert_eq!(down.style.font_size_mpx, 16 * MPX);
         // `baseline` is the initial value, so it has to undo the tag's lift.
         assert_eq!(by_id("flat").style.baseline_shift, 0);
     }
@@ -10048,7 +10115,7 @@ mod tests {
             &super::InteractiveState::default(),
         );
         let element = find_first_element(&styled, "div").expect("the div should exist");
-        assert_eq!(element.style.font_size_px, 20);
+        assert_eq!(element.style.font_size_mpx, 20 * MPX);
         assert_eq!(element.style.width, Some(LengthValue::Pixels(100)));
         assert_eq!(element.style.height, Some(LengthValue::Pixels(40)));
     }
@@ -10079,7 +10146,7 @@ mod tests {
         let paragraph = find_first_element(&styled, "p").expect("paragraph should exist");
 
         assert_eq!(paragraph.style.color, 0x00AA00);
-        assert_eq!(paragraph.style.font_size_px, 24);
+        assert_eq!(paragraph.style.font_size_mpx, 24 * MPX);
         assert_eq!(paragraph.style.margin.top, 6);
         assert_eq!(paragraph.style.white_space, WhiteSpaceMode::Pre);
     }
@@ -11293,6 +11360,45 @@ mod tests {
 
     // ── @media tests ─────────────────────────────────────────────────────────
 
+    /// A media query's `em` is the initial font size, not the element's --
+    /// and not, as it briefly was, a ten-thousandth of a pixel. `40em` read as
+    /// `0.004px` made `(min-width: 40em)` true at every width there is.
+    #[test]
+    fn media_queries_measure_em_against_the_initial_font_size() {
+        let document = parse_document("<p>Hello</p>");
+        let stylesheet = parse_stylesheet(
+            "p { color: #0000ff; } @media (min-width: 40em) { p { color: #ff0000; } }",
+        );
+        let colour_at = |width: u32| {
+            let styled = build_styled_tree(
+                &document,
+                &stylesheet,
+                width,
+                &super::InteractiveState::default(),
+            );
+            find_first_element(&styled, "p").unwrap().style.color
+        };
+        assert_eq!(colour_at(1280), 0xFF0000, "1280px is wider than 40em");
+        assert_eq!(colour_at(500), 0x0000FF, "500px is narrower than 640px");
+    }
+
+    /// `getComputedStyle` keeps the fraction Chrome keeps: `0.8333em` of 16px
+    /// is "13.3328px", not "13px".
+    #[test]
+    fn computed_font_size_keeps_its_fraction() {
+        let document = parse_document("<p><span>x</span></p>");
+        let styled = build_styled_tree(
+            &document,
+            &parse_stylesheet("p { font-size: 16px } span { font-size: 0.8333em }"),
+            1280,
+            &super::InteractiveState::default(),
+        );
+        let span = find_first_element(&styled, "span").unwrap();
+        assert_eq!(super::css_px_string(span.style.font_size_mpx), "13.3328px");
+        assert_eq!(super::css_px_string(16 * MPX), "16px");
+        assert_eq!(super::mpx_to_px(span.style.font_size_mpx), 13);
+    }
+
     #[test]
     fn media_max_width_filters_rules_by_viewport() {
         let document = parse_document("<p>Hello</p>");
@@ -11541,7 +11647,7 @@ mod tests {
             &super::InteractiveState::default(),
         );
         let p = find_first_element(&styled, "p").unwrap();
-        assert_eq!(p.style.font_size_px, 16);
+        assert_eq!(p.style.font_size_mpx, 16 * MPX);
     }
 
     #[test]
@@ -11557,7 +11663,7 @@ mod tests {
         );
         let p = find_first_element(&styled, "p").unwrap();
         assert_eq!(
-            p.style.font_size_px, 14,
+            p.style.font_size_mpx, 14 * MPX,
             "multiplication must bind tighter than addition"
         );
     }
@@ -11574,7 +11680,7 @@ mod tests {
             &super::InteractiveState::default(),
         );
         let p = find_first_element(&styled, "p").unwrap();
-        assert_eq!(p.style.font_size_px, 24);
+        assert_eq!(p.style.font_size_mpx, 24 * MPX);
     }
 
     /// A width like `calc(100% - var(--outline)*2)` reduces to a percentage and
@@ -11583,7 +11689,7 @@ mod tests {
     #[test]
     fn calc_length_value_handles_multiplication() {
         assert_eq!(
-            super::parse_calc_length_value("100% - 2px*2", 16),
+            super::parse_calc_length_value("100% - 2px*2", INITIAL_FONT_SIZE_MPX),
             Some(LengthValue::Calc {
                 percent_hundredths: 10000,
                 px: -4
@@ -11600,8 +11706,8 @@ mod tests {
             px: -320,
         });
         // The stylesheet writes it without spaces; both forms are valid calc().
-        assert_eq!(super::parse_calc_length_value("20em*-1", 16), expected);
-        assert_eq!(super::parse_calc_length_value("20em * -1", 16), expected);
+        assert_eq!(super::parse_calc_length_value("20em*-1", INITIAL_FONT_SIZE_MPX), expected);
+        assert_eq!(super::parse_calc_length_value("20em * -1", INITIAL_FONT_SIZE_MPX), expected);
     }
 
     /// Division, and `rem` resolved against the root font size rather than the
@@ -11613,7 +11719,7 @@ mod tests {
             Some(LengthValue::Pixels(8))
         );
         assert_eq!(
-            super::parse_calc_length_value("35rem*-1/4", 16),
+            super::parse_calc_length_value("35rem*-1/4", INITIAL_FONT_SIZE_MPX),
             Some(LengthValue::Calc {
                 percent_hundredths: 0,
                 px: -140
@@ -11624,8 +11730,8 @@ mod tests {
     /// Two lengths multiplied together is not a valid calc() term.
     #[test]
     fn calc_rejects_length_times_length() {
-        assert_eq!(super::parse_calc_length_value("2px*3px", 16), None);
-        assert_eq!(super::parse_calc_length_value("100%/2px", 16), None);
+        assert_eq!(super::parse_calc_length_value("2px*3px", INITIAL_FONT_SIZE_MPX), None);
+        assert_eq!(super::parse_calc_length_value("100%/2px", INITIAL_FONT_SIZE_MPX), None);
     }
 
     /// `min()`, `max()` and `clamp()` keep their percentages until the
@@ -11637,7 +11743,7 @@ mod tests {
     /// twelve hundred pixels.
     #[test]
     fn min_max_and_clamp_resolve_against_the_containing_block() {
-        let bounded = |input: &str, container: u32| match super::parse_length_value(input, 16) {
+        let bounded = |input: &str, container: u32| match super::parse_length_value(input, INITIAL_FONT_SIZE_MPX) {
             Some(LengthValue::Bounded {
                 lower,
                 value,
@@ -11658,19 +11764,19 @@ mod tests {
     fn calc_vh_uses_800px_base() {
         // 50vh should resolve to 400px (50% of 800px viewport height)
         // This locks the vh base against parse_length's viewport-unit handling
-        let result = parse_length("calc(50vh)", 16);
+        let result = parse_length("calc(50vh)", INITIAL_FONT_SIZE_MPX);
         assert_eq!(result, Some(400));
     }
 
     #[test]
     fn calc_invalid_trailing_operator_returns_none() {
-        assert_eq!(parse_calc("2 *", 16), None);
-        assert_eq!(parse_calc("100% *", 16), None);
+        assert_eq!(parse_calc("2 *", INITIAL_FONT_SIZE_MPX), None);
+        assert_eq!(parse_calc("100% *", INITIAL_FONT_SIZE_MPX), None);
     }
 
     #[test]
     fn calc_valid_expression_still_evaluates() {
-        assert_eq!(parse_calc("2 * 3 + 1", 16), Some(7));
+        assert_eq!(parse_calc("2 * 3 + 1", INITIAL_FONT_SIZE_MPX), Some(7));
     }
 
     // ── rgba() blending tests ─────────────────────────────────────────────────
@@ -12031,18 +12137,18 @@ mod tests {
     #[test]
     fn clamp_resolves_clamped_value() {
         // clamp(10px, 50px, 100px) = 50px
-        assert_eq!(parse_length("clamp(10px, 50px, 100px)", 16), Some(50));
+        assert_eq!(parse_length("clamp(10px, 50px, 100px)", INITIAL_FONT_SIZE_MPX), Some(50));
         // clamp(10px, 5px, 100px) = 10px (below min)
-        assert_eq!(parse_length("clamp(10px, 5px, 100px)", 16), Some(10));
+        assert_eq!(parse_length("clamp(10px, 5px, 100px)", INITIAL_FONT_SIZE_MPX), Some(10));
         // clamp(10px, 200px, 100px) = 100px (above max)
-        assert_eq!(parse_length("clamp(10px, 200px, 100px)", 16), Some(100));
+        assert_eq!(parse_length("clamp(10px, 200px, 100px)", INITIAL_FONT_SIZE_MPX), Some(100));
     }
 
     #[test]
     fn min_max_resolve() {
-        assert_eq!(parse_length("min(30px, 50px)", 16), Some(30));
-        assert_eq!(parse_length("max(30px, 50px)", 16), Some(50));
-        assert_eq!(parse_length("min(100px, 80px, 60px)", 16), Some(60));
+        assert_eq!(parse_length("min(30px, 50px)", INITIAL_FONT_SIZE_MPX), Some(30));
+        assert_eq!(parse_length("max(30px, 50px)", INITIAL_FONT_SIZE_MPX), Some(50));
+        assert_eq!(parse_length("min(100px, 80px, 60px)", INITIAL_FONT_SIZE_MPX), Some(60));
     }
 
     #[test]

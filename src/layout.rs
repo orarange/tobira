@@ -456,7 +456,7 @@ pub struct TextCommand {
     pub y: u32,
     pub width: u32,
     pub text: String,
-    pub font_size_px: u32,
+    pub font_size_mpx: u32,
     pub line_height_px: u32,
     pub font_family: FontFamilyKind,
     pub color: Color,
@@ -542,7 +542,7 @@ pub struct FormControlCommand {
     pub activates_submit: bool,
     pub disabled: bool,
     pub masked: bool,
-    pub font_size_px: u32,
+    pub font_size_mpx: u32,
     pub font_family: FontFamilyKind,
     pub text_color: Color,
     pub background_color: Color,
@@ -2193,7 +2193,7 @@ fn layout_block_element(
                 activates_submit: spec.activates_submit,
                 disabled: spec.disabled,
                 masked: spec.masked,
-                font_size_px: element.style.font_size_px,
+                font_size_mpx: element.style.font_size_mpx,
                 font_family: element.style.font_family,
                 text_color: element.style.color,
                 background_color,
@@ -3101,7 +3101,7 @@ fn clip_text_to_box(
     let mut pen = text.x;
     let mut started = false;
     for character in text.text.chars() {
-        let advance = fonts.glyph_advance_px(character, text.font_size_px, text.font_family);
+        let advance = fonts.glyph_advance_px(character, text.font_size_mpx, text.font_family);
         let next = pen.saturating_add(advance);
         // A glyph counts as visible only if it fits entirely inside the box:
         // the renderer draws whole glyphs, so a partly-covered one would spill.
@@ -3120,7 +3120,7 @@ fn clip_text_to_box(
     if kept.is_empty() {
         return None;
     }
-    let width = fonts.text_width_px(&kept, text.font_size_px, text.font_family);
+    let width = fonts.text_width_px(&kept, text.font_size_mpx, text.font_family);
     Some(TextCommand {
         text: kept,
         x: kept_x,
@@ -4459,7 +4459,7 @@ fn layout_table_element(
                     activates_submit: ctrl.activates_submit,
                     disabled: ctrl.disabled,
                     masked: ctrl.masked,
-                    font_size_px: ctrl.font_size_px,
+                    font_size_mpx: ctrl.font_size_mpx,
                     font_family: ctrl.font_family,
                     text_color: ctrl.text_color,
                     background_color: ctrl.background_color,
@@ -4993,7 +4993,7 @@ fn merge_fragment(
             activates_submit: control.activates_submit,
             disabled: control.disabled,
             masked: control.masked,
-            font_size_px: control.font_size_px,
+            font_size_mpx: control.font_size_mpx,
             font_family: control.font_family,
             text_color: control.text_color,
             background_color: control.background_color,
@@ -5029,7 +5029,7 @@ fn offset_draw_command(cmd: &DrawCommand, offset_x: u32, offset_y: u32) -> DrawC
             y: text.y.saturating_add(offset_y),
             width: text.width,
             text: text.text.clone(),
-            font_size_px: text.font_size_px,
+            font_size_mpx: text.font_size_mpx,
             line_height_px: text.line_height_px,
             font_family: text.font_family,
             color: text.color,
@@ -6400,7 +6400,7 @@ fn apply_ellipsis_to_line(
                 let mut tw = 0u32;
                 for ch in span.text.chars() {
                     let cw =
-                        fonts.glyph_advance_px(ch, span.style.font_size_px, span.style.font_family);
+                        fonts.glyph_advance_px(ch, span.style.font_size_mpx, span.style.font_family);
                     if tw.saturating_add(cw) > available {
                         break;
                     }
@@ -6929,7 +6929,7 @@ fn emit_line_impl(
                 activates_submit: control.activates_submit,
                 disabled: control.disabled,
                 masked: control.masked,
-                font_size_px: span.style.font_size_px,
+                font_size_mpx: span.style.font_size_mpx,
                 font_family: span.style.font_family,
                 text_color: span.style.color,
                 background_color,
@@ -7085,7 +7085,7 @@ fn emit_line_impl(
             y: cursor_y.saturating_add_signed(span.style.baseline_shift),
             width: span.width,
             text: display_text,
-            font_size_px: span.style.font_size_px,
+            font_size_mpx: span.style.font_size_mpx,
             line_height_px: line_height,
             font_family: span.style.font_family,
             color: apply_opacity(span.style.color, context.background_color, span_opacity),
@@ -7157,7 +7157,7 @@ fn is_hidden(node: &StyledNode) -> bool {
 }
 
 fn char_width(style: &ComputedStyle, character: char, fonts: &mut FontContext) -> u32 {
-    fonts.glyph_advance_px(character, style.font_size_px, style.font_family)
+    fonts.glyph_advance_px(character, style.font_size_mpx, style.font_family)
 }
 
 /// Where an inline box's own baseline sits, measured from its top.
@@ -7186,22 +7186,30 @@ fn atomic_baseline(style: &ComputedStyle, fonts: &mut FontContext) -> u32 {
 /// the default sans, which showed up as a line box two pixels too tall around
 /// anything hung from the baseline.
 fn below_baseline(style: &ComputedStyle, fonts: &mut FontContext) -> u32 {
-    let font_size = style.font_size_px;
+    let font_size = style.font_size_mpx;
     let descent = fonts.descent_px(font_size, style.font_family);
     let content = fonts.line_height_px(font_size, style.font_family);
     let line_height = if style.line_height > 0 {
-        (font_size as u64 * style.line_height as u64 / 1000) as u32
+        line_height_from_ratio(font_size, style.line_height)
     } else {
         content
     };
     line_height.saturating_sub(content) / 2 + descent
 }
 
+/// `line-height` as a whole number of pixels: a font size in `css::MPX`ths of
+/// a pixel times a ratio in thousandths.
+fn line_height_from_ratio(font_size_mpx: u32, line_height_per_mille: u32) -> u32 {
+    let scale = 1000 * crate::css::MPX as u64;
+    let product = font_size_mpx as u64 * line_height_per_mille as u64 + scale / 2;
+    (product / scale).min(u32::MAX as u64) as u32
+}
+
 /// Half the x-height, which is how far above the baseline a `middle`-aligned
 /// box has its own centre. Taken as a ratio of the font size: the faces a page
 /// actually uses sit around half their em.
 fn x_half_height(style: &ComputedStyle) -> u32 {
-    style.font_size_px.saturating_mul(26) / 100
+    crate::css::mpx_to_px(style.font_size_mpx).saturating_mul(26) / 100
 }
 
 /// Where an atomic inline's baseline sits inside it.
@@ -7234,19 +7242,19 @@ fn atomic_span_baseline(
 /// shrink the box around the letters. So this is always the face's ascent plus
 /// descent, whatever the line spacing is.
 fn text_content_height(style: &ComputedStyle, fonts: &mut FontContext) -> u32 {
-    fonts.content_height_px(style.font_size_px, style.font_family)
+    fonts.content_height_px(style.font_size_mpx, style.font_family)
 }
 
 fn text_line_height(style: &ComputedStyle, fonts: &mut FontContext) -> u32 {
     if style.line_height > 0 {
-        (style.font_size_px as u64 * style.line_height as u64 / 1000) as u32
+        line_height_from_ratio(style.font_size_mpx, style.line_height)
     } else {
-        fonts.line_height_px(style.font_size_px, style.font_family)
+        fonts.line_height_px(style.font_size_mpx, style.font_family)
     }
 }
 
 fn text_width(style: &ComputedStyle, text: &str, fonts: &mut FontContext) -> u32 {
-    let base = fonts.text_width_px(text, style.font_size_px, style.font_family);
+    let base = fonts.text_width_px(text, style.font_size_mpx, style.font_family);
     let char_count = text.chars().count() as i32;
     let spacing = style.letter_spacing as i32 * char_count;
     if spacing >= 0 {
@@ -9011,7 +9019,9 @@ fn reserve_horizontal_scrollbar(
 fn command_bottom_edge(command: &DrawCommand) -> u32 {
     match command {
         DrawCommand::Rect(rect) => rect.y.saturating_add(rect.height),
-        DrawCommand::Text(text) => text.y.saturating_add(text.font_size_px),
+        // The run's own line box, not its type size -- and never the type
+        // size in thousandths, which made every line claim 160000px of scroll.
+        DrawCommand::Text(text) => text.y.saturating_add(text.line_height_px),
         DrawCommand::Image(image) => image.y.saturating_add(image.height),
         DrawCommand::Gradient(gradient) => gradient.y.saturating_add(gradient.height),
         DrawCommand::Layer(layer) => layer.y.saturating_add(layer.height),
@@ -11780,7 +11790,7 @@ mod percentage_sizing_tests {
             "html { font-size: 62.5%; } p { font-size: 1.2rem; }",
             "<html><body><p>hello</p></body></html>",
         );
-        assert_eq!(runs[0].font_size_px, 12);
+        assert_eq!(runs[0].font_size_mpx, 12 * crate::css::MPX);
     }
 
     /// A page that leaves the root alone still gets the initial 16px basis.
@@ -11790,7 +11800,7 @@ mod percentage_sizing_tests {
             "p { font-size: 1.5rem; }",
             "<html><body><p>hello</p></body></html>",
         );
-        assert_eq!(runs[0].font_size_px, 24);
+        assert_eq!(runs[0].font_size_mpx, 24 * crate::css::MPX);
     }
 
     /// The basis must not leak from one document into the next: these run on
@@ -11801,12 +11811,16 @@ mod percentage_sizing_tests {
             "html { font-size: 50%; } p { font-size: 2rem; }",
             "<html><body><p>hello</p></body></html>",
         );
-        assert_eq!(shrunk[0].font_size_px, 16);
+        assert_eq!(shrunk[0].font_size_mpx, 16 * crate::css::MPX);
         let plain = text_runs(
             "p { font-size: 2rem; }",
             "<html><body><p>hello</p></body></html>",
         );
-        assert_eq!(plain[0].font_size_px, 32, "the previous root leaked");
+        assert_eq!(
+            plain[0].font_size_mpx,
+            32 * crate::css::MPX,
+            "the previous root leaked"
+        );
     }
 
     /// `list-style: none` is how every navigation menu on the web keeps `<ul>`
@@ -12338,7 +12352,7 @@ mod tests {
                         t.x,
                         t.y,
                         t.width,
-                        t.font_size_px,
+                        t.font_size_mpx,
                         indent = depth * 2
                     ),
                     super::DrawCommand::Layer(layer) => {
@@ -12365,7 +12379,7 @@ mod tests {
                 c.y,
                 c.width,
                 c.height,
-                c.font_size_px,
+                c.font_size_mpx,
                 c.background_color,
                 c.text_color,
                 c.border_color

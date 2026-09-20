@@ -28,15 +28,15 @@ python tools/geom/cmp.py g4.html
 | `radius.html` | `border-radius` shorthand forms | 5/6 |
 | `radius2.html` | each corner read back separately | 7/8 |
 | `faces.html` | which font file each family actually loads | 4/8 |
-| `units.html` | every length unit, resolved | 4/9 |
+| `units.html` | every length unit, resolved | 9/9 |
 | `xform.html` | `transform` boxes | 5/6 |
 | `mask.html` | `mask-image` | a picture, not a score: no `<pre id="out">`, look at it |
 | `scrollbar.html` | when a scrollbar takes room | 7/7 |
-| `overflow.html` | overflow in a narrow parent | 10/17 |
+| `overflow.html` | overflow in a narrow parent | 12/17 |
 | `overflow2.html` | `overflow-x` / `-y` set apart | 12/12 |
 | `clipaxis.html` | whether one-axis clipping costs anything | 8/9 |
-| `fsize.html` | text width at fractional type sizes | 3/12 |
-| `lineheight2.html` | line height at fractional type sizes | 7/14 |
+| `fsize.html` | text width at fractional type sizes | 8/12 |
+| `lineheight2.html` | line height at fractional type sizes | 14/14 |
 | `sup.html` | superscripts and `vertical-align` | 2/10 |
 | `details.html` | a closed `<details>` folds its contents away | 3/6 |
 | `hidden.html` | the `hidden` attribute | 7/7 |
@@ -46,8 +46,9 @@ python tools/geom/cmp.py g4.html
 | `noah.html` | fifty unclosed `<font>`: the Noah's Ark clause caps them at three per paragraph | 5/5 |
 
 Scores are from **2026-09-20** at 1280px, every page rescored the same day
-against the Chrome of that day: **283 / 368 = 76.9%** over the 31 pages that
-carry an `out` block. They are not asserted anywhere — this is a hand-run
+against the Chrome of that day, then again after font sizes stopped being
+whole pixels: **302 / 368 = 82.1%** over the 31 pages that carry an `out`
+block (it was 283 / 368 that morning). They are not asserted anywhere — this is a hand-run
 tool, not a test. Re-run the lot and put today's numbers here rather than
 trusting the column; the old ones had drifted by ten days.
 

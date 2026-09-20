@@ -52,10 +52,10 @@ const TOOL_BUTTON_WIDTH: u32 = 52;
 const ADDRESS_BAR_PADDING_X: u32 = 12;
 const CONTROL_PADDING_X: u32 = 8;
 const CONTROL_PADDING_Y: u32 = 6;
-const INFO_FONT_SIZE: u32 = 12;
-const ADDRESS_BAR_FONT_SIZE: u32 = 16;
-const APP_FONT_SIZE: u32 = 18;
-const TITLE_FONT_SIZE: u32 = 14;
+const INFO_FONT_SIZE_MPX: u32 = 12 * crate::css::MPX;
+const ADDRESS_BAR_FONT_SIZE_MPX: u32 = 16 * crate::css::MPX;
+const APP_FONT_SIZE_MPX: u32 = 18 * crate::css::MPX;
+const TITLE_FONT_SIZE_MPX: u32 = 14 * crate::css::MPX;
 const TITLE_META_GAP: u32 = 18;
 const HEADER_BORDER_HEIGHT: u32 = 4;
 const RESIZE_BORDER: u32 = 6;
@@ -628,7 +628,7 @@ impl BrowserApp {
             );
             let line_height = self
                 .fonts
-                .line_height_px(ADDRESS_BAR_FONT_SIZE, FontFamilyKind::Sans);
+                .line_height_px(ADDRESS_BAR_FONT_SIZE_MPX, FontFamilyKind::Sans);
             let text_y = chrome
                 .address_bar
                 .y
@@ -668,12 +668,12 @@ impl BrowserApp {
             &focused_editor,
             &mut self.fonts,
             control.width.saturating_sub(CONTROL_PADDING_X * 2),
-            control.font_size_px,
+            control.font_size_mpx,
             control.font_family,
         );
         let line_height = self
             .fonts
-            .line_height_px(control.font_size_px, control.font_family);
+            .line_height_px(control.font_size_mpx, control.font_family);
         let text_y = body_top
             .saturating_add(control.y.saturating_sub(self.scroll_y))
             .saturating_add(control.height.saturating_sub(line_height) / 2);
@@ -1989,7 +1989,7 @@ impl BrowserApp {
                         &mut self.fonts,
                         control.width.saturating_sub(CONTROL_PADDING_X * 2),
                         local_x,
-                        control.font_size_px,
+                        control.font_size_mpx,
                         control.font_family,
                     );
                     self.focus_page_input_at(&control, Some(char_index));
@@ -2684,8 +2684,8 @@ fn layout_error_document(
         } else {
             DEFAULT_TEXT_COLOR
         };
-        let font_size_px = if scale >= 3 { 28 } else { 18 };
-        let height = fonts.line_height_px(font_size_px, FontFamilyKind::Sans);
+        let font_size_mpx = crate::css::px_to_mpx(if scale >= 3 { 28 } else { 18 });
+        let height = fonts.line_height_px(font_size_mpx, FontFamilyKind::Sans);
 
         if line.is_empty() {
             cursor_y = cursor_y.saturating_add(height / 2);
@@ -2695,9 +2695,9 @@ fn layout_error_document(
         commands.push(DrawCommand::Text(TextCommand {
             x: 0,
             y: cursor_y,
-            width: fonts.text_width_px(line, font_size_px, FontFamilyKind::Sans),
+            width: fonts.text_width_px(line, font_size_mpx, FontFamilyKind::Sans),
             text: line.clone(),
-            font_size_px,
+            font_size_mpx,
             line_height_px: height,
             font_family: FontFamilyKind::Sans,
             color,
@@ -3079,7 +3079,7 @@ struct AddressBarView {
 }
 
 fn chrome_layout_metrics(fonts: &mut FontContext, window_width: u32) -> ChromeLayoutMetrics {
-    let info_height = fonts.line_height_px(INFO_FONT_SIZE, FontFamilyKind::Sans);
+    let info_height = fonts.line_height_px(INFO_FONT_SIZE_MPX, FontFamilyKind::Sans);
     let title_y = CHROME_TOP_PADDING;
     let button_y = title_y.saturating_add(TITLE_BAR_HEIGHT.saturating_sub(BUTTON_HEIGHT) / 2);
     let right_edge = window_width.saturating_sub(FRAME_PADDING);
@@ -3263,7 +3263,7 @@ fn address_bar_view(
         state,
         fonts,
         available_width,
-        ADDRESS_BAR_FONT_SIZE,
+        ADDRESS_BAR_FONT_SIZE_MPX,
         FontFamilyKind::Sans,
     )
 }
@@ -3304,7 +3304,7 @@ fn cursor_index_for_address_x(
         fonts,
         available_width,
         local_x,
-        ADDRESS_BAR_FONT_SIZE,
+        ADDRESS_BAR_FONT_SIZE_MPX,
         FontFamilyKind::Sans,
     )
 }
@@ -3683,7 +3683,7 @@ fn paint_chrome(
         chrome
             .title_bar
             .height
-            .saturating_sub(fonts.line_height_px(APP_FONT_SIZE, FontFamilyKind::Sans))
+            .saturating_sub(fonts.line_height_px(APP_FONT_SIZE_MPX, FontFamilyKind::Sans))
             / 2,
     );
     fonts.draw_text(
@@ -3693,7 +3693,7 @@ fn paint_chrome(
         chrome.title_bar.x,
         title_y,
         "TOBIRA",
-        APP_FONT_SIZE,
+        APP_FONT_SIZE_MPX,
         COLOR_HEADER_TEXT,
         true,
         false,
@@ -3701,7 +3701,7 @@ fn paint_chrome(
         FontFamilyKind::Sans,
     );
 
-    let app_width = fonts.text_width_px("TOBIRA", APP_FONT_SIZE, FontFamilyKind::Sans);
+    let app_width = fonts.text_width_px("TOBIRA", APP_FONT_SIZE_MPX, FontFamilyKind::Sans);
 
     // Build badge right after the brand: the running revision is always on
     // screen, so verifying "is my patch in this build?" is a glance away even
@@ -3715,7 +3715,7 @@ fn paint_chrome(
         chrome
             .title_bar
             .height
-            .saturating_sub(fonts.line_height_px(TITLE_FONT_SIZE, FontFamilyKind::Sans))
+            .saturating_sub(fonts.line_height_px(TITLE_FONT_SIZE_MPX, FontFamilyKind::Sans))
             / 2,
     );
     fonts.draw_text(
@@ -3725,14 +3725,14 @@ fn paint_chrome(
         version_x,
         version_y,
         &version_badge,
-        TITLE_FONT_SIZE,
+        TITLE_FONT_SIZE_MPX,
         COLOR_HEADER_MUTED,
         false,
         false,
         false,
         FontFamilyKind::Sans,
     );
-    let version_width = fonts.text_width_px(&version_badge, TITLE_FONT_SIZE, FontFamilyKind::Sans);
+    let version_width = fonts.text_width_px(&version_badge, TITLE_FONT_SIZE_MPX, FontFamilyKind::Sans);
 
     let page_title_x = version_x.saturating_add(version_width + TITLE_META_GAP);
     let page_title_max_width = chrome
@@ -3743,7 +3743,7 @@ fn paint_chrome(
         fonts,
         &document.title,
         page_title_max_width,
-        TITLE_FONT_SIZE,
+        TITLE_FONT_SIZE_MPX,
         FontFamilyKind::Sans,
     );
     if !page_title.is_empty() {
@@ -3751,7 +3751,7 @@ fn paint_chrome(
             chrome
                 .title_bar
                 .height
-                .saturating_sub(fonts.line_height_px(TITLE_FONT_SIZE, FontFamilyKind::Sans))
+                .saturating_sub(fonts.line_height_px(TITLE_FONT_SIZE_MPX, FontFamilyKind::Sans))
                 / 2,
         );
         fonts.draw_text(
@@ -3761,7 +3761,7 @@ fn paint_chrome(
             page_title_x,
             page_title_y,
             &page_title,
-            TITLE_FONT_SIZE,
+            TITLE_FONT_SIZE_MPX,
             COLOR_HEADER_MUTED,
             false,
             false,
@@ -3885,7 +3885,7 @@ fn paint_chrome(
         chrome
             .address_bar
             .height
-            .saturating_sub(fonts.line_height_px(ADDRESS_BAR_FONT_SIZE, FontFamilyKind::Sans))
+            .saturating_sub(fonts.line_height_px(ADDRESS_BAR_FONT_SIZE_MPX, FontFamilyKind::Sans))
             / 2,
     );
     fonts.draw_text(
@@ -3895,7 +3895,7 @@ fn paint_chrome(
         chrome.address_bar.x.saturating_add(ADDRESS_BAR_PADDING_X),
         address_text_y,
         &address_view.text,
-        ADDRESS_BAR_FONT_SIZE,
+        ADDRESS_BAR_FONT_SIZE_MPX,
         COLOR_ADDRESS_BAR_TEXT,
         false,
         false,
@@ -3929,7 +3929,7 @@ fn paint_chrome(
                 chrome.address_bar.x.saturating_add(ADDRESS_BAR_PADDING_X),
                 address_text_y,
                 &address_view.text,
-                ADDRESS_BAR_FONT_SIZE,
+                ADDRESS_BAR_FONT_SIZE_MPX,
                 COLOR_ADDRESS_BAR_TEXT,
                 false,
                 false,
@@ -3961,7 +3961,7 @@ fn paint_chrome(
         "Enter go | Ctrl+L focus | Ctrl+A/C/X/V edit | scroll: {} / {} px",
         scroll_y, max_scroll_y
     );
-    let meta_right_width = fonts.text_width_px(&meta_right, INFO_FONT_SIZE, FontFamilyKind::Sans);
+    let meta_right_width = fonts.text_width_px(&meta_right, INFO_FONT_SIZE_MPX, FontFamilyKind::Sans);
     let meta_right_x = width
         .saturating_sub(FRAME_PADDING)
         .saturating_sub(meta_right_width);
@@ -3972,7 +3972,7 @@ fn paint_chrome(
         meta_right_x,
         chrome.info_y,
         &meta_right,
-        INFO_FONT_SIZE,
+        INFO_FONT_SIZE_MPX,
         COLOR_HEADER_MUTED,
         false,
         false,
@@ -3986,7 +3986,7 @@ fn paint_chrome(
         fonts,
         &meta_left,
         meta_left_max_width,
-        INFO_FONT_SIZE,
+        INFO_FONT_SIZE_MPX,
         FontFamilyKind::Sans,
     );
     fonts.draw_text(
@@ -3996,7 +3996,7 @@ fn paint_chrome(
         FRAME_PADDING,
         chrome.info_y,
         &meta_left_text,
-        INFO_FONT_SIZE,
+        INFO_FONT_SIZE_MPX,
         if document.is_error() {
             COLOR_ACCENT
         } else {
@@ -4013,19 +4013,19 @@ fn fit_text_to_width(
     fonts: &mut FontContext,
     text: &str,
     max_width: u32,
-    font_size_px: u32,
+    font_size_mpx: u32,
     font_family: FontFamilyKind,
 ) -> String {
     if max_width == 0 {
         return String::new();
     }
 
-    if fonts.text_width_px(text, font_size_px, font_family) <= max_width {
+    if fonts.text_width_px(text, font_size_mpx, font_family) <= max_width {
         return text.to_string();
     }
 
     let ellipsis = "...";
-    let ellipsis_width = fonts.text_width_px(ellipsis, font_size_px, font_family);
+    let ellipsis_width = fonts.text_width_px(ellipsis, font_size_mpx, font_family);
     if ellipsis_width >= max_width {
         return ellipsis.to_string();
     }
@@ -4033,7 +4033,7 @@ fn fit_text_to_width(
     let mut fitted = String::new();
     let mut current_width: u32 = 0;
     for character in text.chars() {
-        let advance = fonts.glyph_advance_px(character, font_size_px, font_family);
+        let advance = fonts.glyph_advance_px(character, font_size_mpx, font_family);
         if current_width
             .saturating_add(advance)
             .saturating_add(ellipsis_width)
@@ -4195,7 +4195,7 @@ fn paint_page_control(
 
     match control.kind {
         FormControlKind::TextInput => {
-            let line_height = fonts.line_height_px(control.font_size_px, control.font_family);
+            let line_height = fonts.line_height_px(control.font_size_mpx, control.font_family);
             let text_y = absolute_y.saturating_add(control.height.saturating_sub(line_height) / 2);
             let available_width = control.width.saturating_sub(CONTROL_PADDING_X * 2);
 
@@ -4218,7 +4218,7 @@ fn paint_page_control(
                     fonts,
                     control.placeholder.as_deref().unwrap_or_default(),
                     available_width,
-                    control.font_size_px,
+                    control.font_size_mpx,
                     control.font_family,
                 );
                 fonts.draw_text(
@@ -4228,7 +4228,7 @@ fn paint_page_control(
                     absolute_x.saturating_add(CONTROL_PADDING_X),
                     text_y,
                     &placeholder,
-                    control.font_size_px,
+                    control.font_size_mpx,
                     COLOR_CONTROL_PLACEHOLDER,
                     false,
                     false,
@@ -4247,7 +4247,7 @@ fn paint_page_control(
                     &editor,
                     fonts,
                     available_width,
-                    control.font_size_px,
+                    control.font_size_mpx,
                     control.font_family,
                 );
                 if focused.is_some()
@@ -4283,7 +4283,7 @@ fn paint_page_control(
                     } else {
                         &view.text
                     },
-                    control.font_size_px,
+                    control.font_size_mpx,
                     control.text_color,
                     false,
                     false,
@@ -4322,11 +4322,11 @@ fn paint_page_control(
                 fonts,
                 label,
                 control.width.saturating_sub(CONTROL_PADDING_X * 2),
-                control.font_size_px,
+                control.font_size_mpx,
                 control.font_family,
             );
-            let text_width = fonts.text_width_px(&label, control.font_size_px, control.font_family);
-            let line_height = fonts.line_height_px(control.font_size_px, control.font_family);
+            let text_width = fonts.text_width_px(&label, control.font_size_mpx, control.font_family);
+            let line_height = fonts.line_height_px(control.font_size_mpx, control.font_family);
             let text_x = absolute_x.saturating_add(control.width.saturating_sub(text_width) / 2);
             let text_y = absolute_y.saturating_add(control.height.saturating_sub(line_height) / 2);
             fonts.draw_text(
@@ -4336,7 +4336,7 @@ fn paint_page_control(
                 text_x,
                 text_y,
                 &label,
-                control.font_size_px,
+                control.font_size_mpx,
                 control.text_color,
                 true,
                 false,
@@ -4351,10 +4351,10 @@ fn paint_page_control(
                 control
                     .width
                     .saturating_sub(CONTROL_PADDING_X * 2 + SELECT_CHEVRON_WIDTH),
-                control.font_size_px,
+                control.font_size_mpx,
                 control.font_family,
             );
-            let line_height = fonts.line_height_px(control.font_size_px, control.font_family);
+            let line_height = fonts.line_height_px(control.font_size_mpx, control.font_family);
             let text_y = absolute_y.saturating_add(control.height.saturating_sub(line_height) / 2);
             fonts.draw_text(
                 buffer,
@@ -4363,7 +4363,7 @@ fn paint_page_control(
                 absolute_x.saturating_add(CONTROL_PADDING_X),
                 text_y,
                 &chosen,
-                control.font_size_px,
+                control.font_size_mpx,
                 control.text_color,
                 false,
                 false,
@@ -4598,7 +4598,7 @@ fn render_commands(
             DrawCommand::Text(text) => {
                 let text_bottom = text
                     .y
-                    .saturating_add(fonts.line_height_px(text.font_size_px, text.font_family));
+                    .saturating_add(fonts.line_height_px(text.font_size_mpx, text.font_family));
                 if text_bottom < scroll_y || text.y > viewport_bottom {
                     continue;
                 }
@@ -4622,7 +4622,7 @@ fn render_commands(
                         shadow_x,
                         shadow_y,
                         &text.text,
-                        text.font_size_px,
+                        text.font_size_mpx,
                         shadow.color,
                         false,
                         false,
@@ -4638,7 +4638,7 @@ fn render_commands(
                     text_draw_x as i32,
                     text_draw_y as i32,
                     &text.text,
-                    text.font_size_px,
+                    text.font_size_mpx,
                     text.color,
                     text.bold,
                     text.underline,

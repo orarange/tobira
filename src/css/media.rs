@@ -1,6 +1,6 @@
 //! CSS `@media` query parsing and evaluation (extracted from css.rs).
 
-use super::{parse_calc, parse_length, split_at_top_level};
+use super::{INITIAL_FONT_SIZE_MPX, parse_calc, parse_length, split_at_top_level};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum MediaCondition {
@@ -262,9 +262,9 @@ fn parse_media_length(value: &str) -> Option<u32> {
         .strip_prefix("calc(")
         .and_then(|rest| rest.strip_suffix(')'))
     {
-        return parse_calc(inner, 16);
+        return parse_calc(inner, INITIAL_FONT_SIZE_MPX);
     }
-    parse_length(value, 16)
+    parse_length(value, INITIAL_FONT_SIZE_MPX)
 }
 
 /// The range syntax: `(width >= 40rem)`, `(width < 769px)`, the reversed

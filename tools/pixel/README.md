@@ -26,7 +26,13 @@ figure to watch is a page's own, against what it scored before:
 more than a tenth of a point. Bless deliberately, and read the diff of
 `baseline.tsv` as the record of what a change did to the picture.
 
-First run, 2026-09-20, 1280x900, **mean 3.20% over 36 pages**. Worst:
+First run, 2026-09-20, 1280x900, **mean 3.20% over 36 pages**; after font
+sizes became fractional the same day, 3.19%, with `units` and `arrow2` a
+tenth of a point *worse* -- their glyphs are now rasterised at fractional
+sizes, so the outlines land differently even though the positions match
+Chrome for the first time. That trade is what this tool is for: the geometry
+score went up and the picture score did not follow, and both numbers are
+visible instead of one hiding the other. Worst:
 `carousel` 9.08%, `fsize` 6.29%, `arrow3` 5.44%, `g6b` 5.01%, `anim` 4.92%.
 Best: `mask` 0.81%, `lineheight` 1.06%, `anim2` 1.47%, `layer` 1.53%.
 

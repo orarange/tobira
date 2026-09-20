@@ -1201,6 +1201,49 @@ react.dev だけ撮らんかった一枚が退化しとった。
   - 残りの塊: `Object.getOwnPropertyDescriptor` / `hasOwnProperty` が primitive を
     ToObject せん（22 本。`ObjectKind::Primitive` があるので繋ぐだけ）、
     bigint literal（5 本）、`Math.sumPrecise`（5 本）。
+- **font-size を整数 px から 1/10000 px の固定小数にした**（2026-09-20）。
+  `ComputedStyle::font_size_mpx`（旧 `font_size_px`）。`font-size: 0.8333em` を
+  Chrome は 13.3333px で持つのに、tobira は **13px に丸めてから字を測っとった**。
+  一文字 0.3px のずれが一行で数 px になり、行分けが変わり、頁全体が少しずつ
+  狂う。`tools/geom` の fsize 3/12・units 4/9・lineheight2 7/14 が全部これ。
+  - **f32 やのうて固定小数**（Mac の指摘で方針変更、Codex も同意）。
+    `ComputedStyle` は `Eq` / `Hash` を derive しとって
+    `HashSet<Arc<ComputedStyle>>` で interning しとる（css.rs の
+    `STYLE_INTERNER`）。f32 にするとこれが derive できんくなって、
+    style 共有と glyph cache の鍵まで波及する。`line_height` が既に
+    「千分率の整数」でやっとる先例があった。
+  - **改名が肝**: `font_size_px` のまま単位だけ変えると 140 箇所が黙って
+    1000 倍ずれる。`font_size_mpx` / `parent_font_size_mpx` /
+    `INITIAL_FONT_SIZE_MPX` / `ADDRESS_BAR_FONT_SIZE_MPX` に改名して、
+    **コンパイラに全部挙げさせた**。それでも型が同じ u32 なので、
+    **算術で使っとる 50 箇所は手で見た**（ここは型では捕まらん）。
+  - 単位は **1/10000 px**（`css::MPX`）。1/1000 でも字幅は合うが、
+    `getComputedStyle` が "13.333px" になって Chrome の "13.3333px" と
+    文字列が合わん。10000 にすると `units.html` が 4/9 → **9/9**。
+  - 境界の決め: CSS の計算値と font.rs の API は mpx、**layout の座標は
+    整数 px のまま**。font.rs は測る所だけ `mpx_to_f32`、下線や太字の
+    にじみなど「飾り」は `mpx_to_px`。glyph cache の鍵は mpx のまま
+    （量子化はせん。鍵だけ丸めて別サイズで rasterize すると嘘になる）。
+  - 落とし穴だった所: `parse_line_height` が px 指定を ratio に直すとき
+    分母を mpx のまま使うて行の高さが 32000px になった（g2 で発覚）、
+    ブラウザ UI の `ADDRESS_BAR_FONT_SIZE` 等が px のままで 0.0016px の字を
+    描こうとした、`calc()` の em/rem 係数が px 基準、`parse_length` の
+    本体（px 版は mpx 版を丸めるだけにした）。
+  - 結果: **geom 283/368 (76.9%) → 302/368 (82.1%)**。
+    fsize 3→8、units 4→**9/9**、lineheight2 7→**14/14**、overflow 10→12。
+    テスト 1200 通過。六枚の DOM は変化なし。
+  - **Codex のレビューで四つ拾うた**（自分では見つけられんかったやつ）:
+    ① `scroll_extent` が `text.y + text.font_size_mpx` しとって、一行ごとに
+    16万 px の scrollHeight を主張しとった（`line_height_px` に修正）。
+    ② **`src/css/media.rs` の存在を見落としとった** — `parse_length(value, 16)`
+    が残って、media query の `em` が 0.0016px 扱い。`(min-width: 40em)` が
+    **どの幅でも真**になる。③ `parse_box_shadow` も同じ 16 リテラル。
+    ④ `mpx_to_px` が u32::MAX 付近で溢れる。全部直して回帰テストを置いた。
+    **grep は `src/*.rs` だけ見とった。サブディレクトリを忘れとった。**
+  - 画素差分は 3.20% → 3.19%（ほぼ同じ）。`units` と `arrow2` が 0.1〜0.2
+    ポイント悪化しとるのは、**字が小数サイズで rasterize されるようになって
+    輪郭の当たりが Chrome と変わった**ため。位置は合うようになって、
+    塗りが少しずれた、という交換。絵で確認済み。
 - **primitive の wrapper を最後まで繋いだ**（2026-09-20）。`new Number(3)` /
   `new String("a")` / `new Boolean(x)` が **primitive を返しとった**
   （`typeof new Number(3)` が "number"）。`ObjectKind::Primitive` は 09-19 に
