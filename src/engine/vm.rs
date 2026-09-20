@@ -6799,6 +6799,63 @@ impl Vm {
         self.worker_closed
     }
 
+    /// Offer a worker's own `onerror` the failure first.
+    ///
+    /// A worker that handles its own error -- by returning true or calling
+    /// `preventDefault()` -- has "handled" it, and the document hears
+    /// nothing. Only what it does not handle is reported outwards. Answering
+    /// `true` here means handled.
+    pub fn dispatch_worker_error(&mut self, message: &str, filename: &str, lineno: u32) -> bool {
+        let text = self.make_string_value(message);
+        let target = self
+            .worker_global
+            .map(Value::Object)
+            .unwrap_or(Value::Undefined);
+        let event = self.build_message_event("error", "message", text, target.clone());
+        let name = self.make_string_value(filename);
+        self.define_data_property(
+            event,
+            PropertyKey::from("filename"),
+            name,
+            true,
+            true,
+            true,
+        );
+        for (field, number) in [("lineno", lineno), ("colno", 0)] {
+            self.define_data_property(
+                event,
+                PropertyKey::from(field),
+                Value::Number(f64::from(number)),
+                true,
+                true,
+                true,
+            );
+        }
+        let mut handler = self
+            .globals
+            .get("onerror")
+            .cloned()
+            .unwrap_or(Value::Undefined);
+        if !self.is_callable_value(&handler)
+            && let Some(global_ref) = self.worker_global
+            && let Ok(found) = self
+                .get_property_value(&Value::Object(global_ref), &PropertyKey::from("onerror"))
+        {
+            handler = found;
+        }
+        if !self.is_callable_value(&handler) {
+            return false;
+        }
+        let result = self.call_value_sync(handler, target, vec![Value::Object(event)]);
+        self.drain_microtasks();
+        let returned_true = matches!(result, Ok(Value::Bool(true)));
+        let prevented = self
+            .get_property_value(&Value::Object(event), &PropertyKey::from("defaultPrevented"))
+            .map(|value| self.is_truthy(&value))
+            .unwrap_or(false);
+        returned_true || prevented
+    }
+
     /// Give a worker's script a message from the document.
     pub fn dispatch_worker_message(&mut self, data: HostData) -> Result<(), VmError> {
         let payload = self.host_data_to_value(data);

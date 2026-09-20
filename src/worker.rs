@@ -254,14 +254,19 @@ fn run_worker(
     // failure here is the page's to hear about: a worker that dies quietly
     // leaves whoever started it waiting for a reply that is never coming.
     if let Err(error) = vm.eval_source(&source) {
-        let _ = back.send((
-            id,
-            WorkerEvent::Error {
-                message: format!("{error}"),
-                filename: url.clone(),
-                lineno: 0,
-            },
-        ));
+        // The worker's own `onerror` sees it first. Only what it does not
+        // handle travels back to the document.
+        let message = format!("{error}");
+        if !vm.dispatch_worker_error(&message, &url, 0) {
+            let _ = back.send((
+                id,
+                WorkerEvent::Error {
+                    message,
+                    filename: url.clone(),
+                    lineno: 0,
+                },
+            ));
+        }
         return;
     }
     let mut now_ms = 0u64;
@@ -272,14 +277,17 @@ fn run_worker(
                     continue;
                 }
                 if let Err(error) = vm.dispatch_worker_message(data) {
-                    let _ = back.send((
-                        id,
-                        WorkerEvent::Error {
-                            message: format!("{error}"),
-                            filename: url.clone(),
-                            lineno: 0,
-                        },
-                    ));
+                    let message = format!("{error}");
+                    if !vm.dispatch_worker_error(&message, &url, 0) {
+                        let _ = back.send((
+                            id,
+                            WorkerEvent::Error {
+                                message,
+                                filename: url.clone(),
+                                lineno: 0,
+                            },
+                        ));
+                    }
                 }
                 // Timers and promises the handler queued, before the next
                 // message is taken: a worker has its own event loop.

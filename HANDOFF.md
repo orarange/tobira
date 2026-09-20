@@ -1209,6 +1209,29 @@ react.dev だけ撮らんかった一枚が退化しとった。
   持つ頁なら要素名まで出る。実頁には `out` が無いので、**HN の該当部分だけ
   切り出した検体を作る**のが早い。行間か padding か表の行の高さかが、
   推測やのうて名指しで出る。作ってあるのに、まだこの問いに使うてない。
+- **`A | B => ...` の腕は、両方のパターンを見ること**（2026-09-20 の教訓）。
+  09-18 に `unreachable pattern` を点検したとき、`"createEvent" |
+  "createComment" => stub` の腕を見て「`createComment` は本物が先に拾うので
+  無害」と確かめて終わっとった。**同じ腕の `createEvent` は誰も見とらんかった**
+  ので、`document.createEvent` はずっと壊れとった（object を返しとった）。
+  片方が dead やと分かった安心感が、もう片方を見る気を奪う。
+  実頁は `createEvent` を使わん（`new Event()` を使う）ので、**WPT の runner
+  が無かったら永久に見つからんかった**。
+- **runner の「理由の内訳」は症状の内訳であって、原因の内訳やない**。
+  `object is not callable` 68 本は**二つの別の原因**（`handleEvent` 形式の
+  リスナーと `createEvent`）から出とった。内訳は「次に見る場所」を絞る道具で、
+  「原因が一つ」の証拠やない。
+- **`composedPath()` に `window` が入っとらん**（2026-09-20、未修正）。
+  ```
+  tobira: len=5 b>a>BODY>HTML>#document   last-is-window=false doc-in-path=false
+  chrome: len=6 b>a>BODY>HTML>#document>[object Window] last-is-window=true doc-in-path=true
+  ```
+  最後の要素が `document` と**同一オブジェクトでもない**（`indexOf(document)`
+  が -1）。WPT `dom/events` の `lengths differ, expected array` 131 本は
+  たぶんこれ。直しは `composedPath` 側やのうて **window と document を別の
+  handle にする**方（capture の登録順が混ざる件と同じ根。Mac の読み）。
+  触る範囲が広いので、CSSOM の後に腰を据えてやること。検体
+  `tools/scripterr/composed.html`。
 - **`handleEvent` のオブジェクト形式のリスナー**（2026-09-20）。
   `addEventListener(type, { handleEvent(e){} })` は仕様どおりの形やのに、
   tobira は関数しか受け付けず **呼ぶ瞬間に「object is not callable」**を
@@ -1244,6 +1267,9 @@ react.dev だけ撮らんかった一枚が退化しとった。
     detach したスレッドを終了時に待つ者はおらん。上限 32 本。
   - 数字: WPT `workers` **17 → 51 assertions**、検体
     `tools/scripterr/worker.html` が **Chrome と一致**（`SharedWorker` 以外）。
+  - worker の中で投げた例外は、**まず worker 自身の `self.onerror`** に行く。
+    そこで `true` を返すか `preventDefault()` したら「処理済み」で、文書には
+    何も行かん。拾われんかったものだけが外へ出る。
   - worker の失敗は **`ErrorEvent`**（`message` / `filename` / `lineno` /
     `colno` / `error` と `Symbol.toStringTag = "ErrorEvent"`）。
     WPT workers 51 → **56**。

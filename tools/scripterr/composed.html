@@ -1,0 +1,13 @@
+<div id="a"><span id="b">x</span></div><pre id="out"></pre><script>
+var L=[]; function t(n,f){ try{ L.push(n+"="+f()); }catch(e){ L.push(n+"!"+e.name); } }
+var b=document.getElementById("b"), path=null;
+b.addEventListener("click", function(e){ path = e.composedPath(); });
+b.dispatchEvent(new Event("click", {bubbles:true}));
+t("has-composedPath", function(){ return typeof b.dispatchEvent === "function" && path !== null; });
+t("len", function(){ return path ? path.length : "null"; });
+t("names", function(){ return path ? path.map(function(n){ return n.id || n.nodeName || String(n); }).join(">") : "null"; });
+t("last-is-window", function(){ return path ? (path[path.length-1] === window) : "null"; });
+t("doc-in-path", function(){ return path ? (path.indexOf(document) >= 0) : "null"; });
+t("window-is-document", function(){ return window === document; });
+document.getElementById("out").textContent = L.join(" | ");
+</script>
