@@ -1,0 +1,20 @@
+<style id="s1">#a { color: rgb(1, 2, 3); width: 10px }
+@media (min-width: 1px) { #a { height: 5px } }</style>
+<div id="a">x</div><pre id="out"></pre><script>
+var L=[]; function t(n,f){ try{ L.push(n+"="+f()); }catch(e){ L.push(n+"!"+e.name+":"+String(e.message).slice(0,40)); } }
+t("styleSheets", function(){ return typeof document.styleSheets; });
+t("length", function(){ return document.styleSheets.length; });
+var sheet; t("sheet", function(){ sheet = document.styleSheets[0]; return typeof sheet; });
+t("ownerNode", function(){ return sheet.ownerNode && sheet.ownerNode.id; });
+t("cssRules", function(){ return sheet.cssRules.length; });
+t("rule0-text", function(){ return sheet.cssRules[0].cssText; });
+t("selectorText", function(){ return sheet.cssRules[0].selectorText; });
+t("style-color", function(){ return sheet.cssRules[0].style.color; });
+t("media-rule", function(){ return sheet.cssRules[1] && sheet.cssRules[1].conditionText; });
+t("insertRule", function(){ return sheet.insertRule("#a { color: rgb(9, 9, 9) }", sheet.cssRules.length); });
+t("after-insert-len", function(){ return sheet.cssRules.length; });
+t("computed-after", function(){ return getComputedStyle(document.getElementById("a")).color; });
+t("deleteRule", function(){ sheet.deleteRule(sheet.cssRules.length - 1); return sheet.cssRules.length; });
+t("el-sheet", function(){ return typeof document.getElementById("s1").sheet; });
+document.getElementById("out").textContent = L.join(" | ");
+</script>

@@ -1209,6 +1209,30 @@ react.dev だけ撮らんかった一枚が退化しとった。
   持つ頁なら要素名まで出る。実頁には `out` が無いので、**HN の該当部分だけ
   切り出した検体を作る**のが早い。行間か padding か表の行の高さかが、
   推測やのうて名指しで出る。作ってあるのに、まだこの問いに使うてない。
+- **次の的: CSSOM（`document.styleSheets`）**。2026-09-20 に測った「前」の
+  状態（検体 `tools/scripterr/cssom.html`）:
+  ```
+  tobira: styleSheets=undefined （以降すべて TypeError）
+  chrome: styleSheets=object length=1 cssRules=2
+          rule0-text=#a { color: rgb(1, 2, 3); width: 10px; }
+          selectorText=#a  media-rule=(min-width: 1px)
+          insertRule=2 → computed-after=rgb(9, 9, 9)
+  ```
+  **`document.styleSheets` が丸ごと無い。** WPT `css/cssom` の
+  1859 本の失敗のうち `sheet.cssRules` が 139、`insertRule` 18、`media` 18。
+  - **実頁に効く**: styled-components / emotion のような CSS-in-JS は
+    `sheet.insertRule` でスタイルを注入する。React のアプリでは常用。
+  - **設計の要**: `insertRule` がリストを書き換えるだけで**カスケードに
+    戻らん**と、**WPT は緑になるのに CSS-in-JS の頁は崩れたまま**になる。
+    `TOBIRA_INCREMENTAL_RESTYLE` / `compute_dirty_roots()` / `relayout()` が
+    既にあるので、**最初から mutation として流し込む形で作ること**。
+    後から繋ぐと「動いとるように見える実装」の上に積むことになる（Mac）。
+  - **文字列の直列化が仕様で決まっとる**: `cssText` も `selectorText` も
+    `conditionText` も空白と引用符の入れ方まで規定があって、試験は文字列で
+    比べる。`getComputedStyle` が "13.333px" では駄目やったのと同じ種類。
+    **最初から試験を見ながら書く方が早い。**
+  - 検証は WPT だけやのうて、**`--dump-styled` か画素差分で実際に色が
+    変わったことを見る**検体を置くこと。
 - **`A | B => ...` の腕は、両方のパターンを見ること**（2026-09-20 の教訓）。
   09-18 に `unreachable pattern` を点検したとき、`"createEvent" |
   "createComment" => stub` の腕を見て「`createComment` は本物が先に拾うので
