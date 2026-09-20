@@ -550,6 +550,18 @@ receiver の own property 数 1 / 20 / 100 / 400 で回すと、O(幅) の処理
 ## 作業の流儀
 
 - `git add -A` は使わん。`git add -u` か、パスを明示。
+  （2026-09-20 に 24 コミット続けて破った。`.gitignore` と `ship.sh` の
+  untracked 検査のおかげで紛れ込みは無かったが、**それは運が良かっただけ**。
+  新しい生成物を作る日ほど危ない — この日は `*.any.html` と `tools/*/out/`
+  を作っとった。）
+- **当てずっぽうで直さん。計器を作って測ってから直す。**
+  手書きの検体は「思いついたもの」しか見えん。09-19〜20 に外した読みが
+  七つ（web font が画素差の底・行の積算が HN の 10%・`namespaceURI`・
+  fetch の永久 pending・on* 属性・`Reached unreachable code` がエンジンの
+  バグ・要素の wrapper も別物）あって、**外れが積もったから外の物差し
+  （test262 / WPT）を入れる判断に辿り着いた**。`document.createEvent` が
+  壊れとったのも、worker の event に `preventDefault` が無かったのも、
+  **手書きでは書かん試験**が見つけた。計器は結論やのうて、外し続けた結果。
 - commit message は `git commit -F <tempfile>`（日本語が壊れるため）。
 - 性能を測るときは必ず `--release`。デバッグビルドの数字は意味が無い。
 - PowerShell script に日本語パスを直書きせん。`[Environment]::GetFolderPath('MyDocuments')`。
