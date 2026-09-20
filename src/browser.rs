@@ -1720,6 +1720,10 @@ pub(crate) fn collect_stylesheet_text(document: &Node, base_url: &Url) -> String
 }
 
 fn collect_stylesheet(document: &Node, base_url: &Url) -> Stylesheet {
+    // `STYLESHEET_MEMO` keeps the *text* of a fetched sheet, not the parsed
+    // rules: every rebuild parses the page's whole CSS again.
+    // `TOBIRA_TIME_LAYOUT=1` says what that costs.
+    let started = std::time::Instant::now();
     let mut stylesheet = Stylesheet::default();
 
     for style_text in collect_style_blocks(document) {
@@ -1748,6 +1752,12 @@ fn collect_stylesheet(document: &Node, base_url: &Url) -> Stylesheet {
         stylesheet.extend(sheet);
     }
 
+    if std::env::var_os("TOBIRA_TIME_LAYOUT").is_some() {
+        eprintln!(
+            "[css] {:.1} ms to parse the page's stylesheets",
+            started.elapsed().as_secs_f64() * 1000.0
+        );
+    }
     stylesheet
 }
 

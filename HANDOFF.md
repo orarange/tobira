@@ -379,6 +379,15 @@ receiver の own property 数 1 / 20 / 100 / 400 で回すと、O(幅) の処理
     → 268KB を parse し直して styled tree を作り直すのが **1.9 秒 × 33 回**。
     **次の的はここ**: 属性・テキストの変更も増分で当てられるようにする
     （engine 側に childlist 以外の mutation の記録が要る）。
+    - **容疑者①「stylesheet を毎回パースし直しとる」は外れ**（同日実測）。
+      `collect_stylesheet` は確かに再構築のたびに全部パースし直しとる
+      （`STYLESHEET_MEMO` はテキストだけの memo）が、**6 ms / 回、
+      35 回で 0.2 秒、apply 47.7 秒の 0%**。**コードの形は当たっとったが、
+      効いとらんかった**。`TOBIRA_TIME_LAYOUT=1` の `[css]` 行で見れる。
+    - **残りの容疑者**: `parse_document`（HTML 268KB）と
+      `build_styled_tree`（セレクタ照合が 1846 要素 × 規則数の総当たりに
+      なっとらんか）。**次はこの二つを分けて測る**こと。apply 1402ms の
+      うち css 6ms・layout は別勘定なので、**ほぼ全部がこの二つ**。
     なお **268KB の parse + restyle に 1.9 秒は、それ自体が遅すぎる**
     （parse は普通 10〜50ms）。増分にするのと別に、**中を割る価値がある**
     （Mac の読み: セレクタの照合が要素数 × 規則数の総当たりになっとらんか。
