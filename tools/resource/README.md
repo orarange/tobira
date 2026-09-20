@@ -1,0 +1,64 @@
+# What a page costs
+
+Being light is the second goal this browser states for itself (HANDOFF,
+設計判断). Five instruments say whether tobira is *right*; none of them said
+what being right costs, and the memory-shaped changes of the last days --
+workers with a `Vm` each, glyph caches, a stylesheet memo -- went in
+unmeasured.
+
+```
+python -m http.server 8731 --directory tools/geom &
+python tools/resource/measure.py --pages          # the six reference pages
+python tools/resource/measure.py g1.html          # a geom probe
+python tools/resource/measure.py --pages --bless  # record the cost
+```
+
+Per page and per browser: **peak working set**, CPU seconds and wall seconds.
+`baseline.tsv` holds tobira's, and a run fails when a page costs more than
+`RESOURCE_SLACK` (25%) over what it cost before.
+
+**Chrome is many processes and tobira is one.** Measuring `chrome.exe` alone
+leaves out the renderer, the GPU process and the utilities -- most of the
+memory -- so tobira would look several times heavier than it is for no reason
+but the shape of the question. Every process in the tree is counted, on both
+sides. It is the same lesson as asking both browsers for the same
+`prefers-color-scheme`: **a comparison is only worth reading if both sides
+were asked the same thing.**
+
+Peak, not current: the number that decides whether a machine swaps is the
+high-water mark, and a browser that frees its memory just before exiting
+still needed it.
+
+## First run, 2026-09-20, 1280x900
+
+| page | tobira MiB | Chrome MiB | share | tobira CPU | Chrome CPU | tobira wall | Chrome wall |
+|------|-----------:|-----------:|------:|-----------:|-----------:|------------:|------------:|
+| news.ycombinator.com | **50.7** | 510.5 | **10%** | 0.33 | 1.66 | 1.51 | 1.09 |
+| developer.mozilla.org | 297.1 | 588.2 | 51% | 2.12 | 2.48 | 2.89 | 2.73 |
+| lobste.rs | 300.5 | 526.4 | 57% | 1.70 | 2.06 | 7.57 | 1.16 |
+| react.dev | 460.7 | 604.8 | 76% | **38.56** | 2.58 | **59.46** | 0.97 |
+| vuejs.org | 518.9 | 636.4 | 82% | 4.67 | 2.50 | 6.26 | 1.80 |
+| ja.wikipedia.org | **599.1** | 566.2 | **106%** | 8.42 | 2.28 | 34.42 | 1.97 |
+
+Two things the first run said, neither of them guessed beforehand:
+
+**Memory is not the problem; CPU is.** tobira is lighter than Chrome on five
+of six pages, and on a page without script it is a tenth of it. But react.dev
+costs **fifteen times Chrome's CPU and sixty times its wall clock**, and
+Wikipedia is the one page that costs *more memory* than Chrome.
+
+**The settle loop is where the CPU goes.** Splitting react.dev:
+
+```
+TOBIRA_SETTLE_MS=0        6.06 CPU s    7.38 s wall
+TOBIRA_SETTLE_MS=2000    38.05 CPU s   57.93 s wall   (the default)
+TOBIRA_DYNAMIC_SCRIPTS=0 37.72 CPU s   61.78 s wall   (so: not the scripts)
+```
+
+**Thirty-two CPU seconds are spent settling one page.** The settle loop lays
+the whole document out again every frame (HANDOFF, 2026-09-18) and react.dev
+is 1846 elements. The on-demand layout that `layout_dirty` / `ensure_layout`
+provides is evidently not reaching this path. That is the first thing to look
+at, and it is worth remembering that the settle is also what took react.dev
+from 62 elements to Chrome's 1846: **the cost bought correctness, and now the
+cost can be seen.**
