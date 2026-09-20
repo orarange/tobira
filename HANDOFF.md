@@ -1127,6 +1127,42 @@ react.dev だけ撮らんかった一枚が退化しとった。
     bigint literal、`Math.sumPrecise`。
   - `new Number(3)` が primitive を返す件は、`built-ins/Number` に正解が
     入ったので、ここを見ながら直す。
+- **「頁が一行でブラウザを殺せる」穴を潰した**（2026-09-19、検体
+  `tools/scripterr/alloc.html`、40 ケース）。206GB の件は一箇所の bug やのうて
+  **種類**やった（Mac の指摘）。JS が渡した数がそのまま Rust の確保量になる所を
+  全部並べて Chrome と比べた。
+  - **プロセスごと abort しとった 6 件**（`catch` では拾えん。`memory
+    allocation of N bytes failed`）: `"x".repeat(Infinity)`（9.2e18 要求）、
+    `new ArrayBuffer(1e12)`、`new Uint8Array(1e12)`、深い
+    `JSON.stringify`、それと 2^32-1 index の件。
+  - **殺されるまで走っとった 4 件**（30 秒で timeout）: `padStart(4e9)` /
+    `padEnd(4e9)`（**一周ごとに文字列全体を数え直して前に足す** O(n^2)）、
+    `"xxxxxxxxxxxxxxxx".repeat(1e9)`、`s += s` を 40 回。
+  - **黙って巨大を返しとった 4 件**: `new ArrayBuffer(8e9)`、
+    `new Float64Array(4e9)`（34GB）、`"x".repeat(2147483647)`、
+    65537 × 65536 の `join`。
+  - 直し方: 閾値を超えたら Chrome と同じ RangeError。
+    文字列 `MAX_STRING_LENGTH` = 2^29-24（V8 と同じ）、buffer
+    `MAX_ARRAY_BUFFER_LENGTH` = 2^31、`JSON.stringify` の深さ 500。
+    `toFixed` / `toPrecision` / `toString(radix)` の引数も、黙って
+    clamp しとったのを仕様どおり RangeError にした（`(1).toString(1)` も）。
+    `padStart` / `padEnd` は O(n) に書き直した（`"x".padStart(4,"ab")` は
+    "abax"）。**`JSON.stringify` に循環検出が無かった**のも同時に判明、
+    TypeError にした。
+  - **深さ 500 の根拠**: ブラウザ本体の main thread では 20000 段通って
+    50000 手前で abort、テストスレッドの細いスタックでは 1000 通って 2000 で
+    溢れた。frame が太い上に、呼ばれる時点で既に深い所におる。一番小さい
+    実測値の半分を採った。Chrome は 10 万段くらい。
+  - **Chrome とわざと違う所（4 つ、全部 tobira が RangeError で Chrome が答える）**:
+    length だけ巨大で中身が無い配列を舐める `join` / `indexOf` / `includes` /
+    `lastIndexOf`（配列が property map で、builtin が密な Vec に展開する構造の
+    せい。2^26 要素で切っとる）と、500 段超の `JSON.stringify`。
+    逆に Chrome が 25 秒超で返って来んケースが 7 つあって、そこは tobira の方が
+    即座に RangeError を返す。
+  - **残っとる本物のバグ一つ**: `JSON.parse` の 10 万段が TypeError
+    （Chrome は普通に parse する）。落ちはせんので後回し。
+  - test262 は 614 → **617**（`toFixed` の引数範囲で 3 本）、落ちたものは無し。
+    baseline.txt の diff が +3 行だけ、という形で確認できた。
 - **`ai-branch-merge-loop.yml` は作られた日から YAML が壊れとった**
   （2026-09-19 に判明）。merge の step の複数行コミットメッセージが `run: |` の
   字下げから出とって、ファイルごと無効。一度も job を作れたことが無く、GitHub は

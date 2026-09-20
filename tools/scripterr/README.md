@@ -42,7 +42,19 @@ TOBIRA_DEBUG_CONSOLE=1 TOBIRA_DEBUG_SCRIPTS=1 ./target/release/tobira --cli http
 | `attrsel.html`, `attrsel2.html`, `attrsel3.html` | the selectors the shadow rewrite produces, in a plain document | all applied; kept from the hunt for why `:host` did not reach (the geometry runs had not read the shadow `<style>`) |
 | `supportsprobe.html` | `CSS.supports` (both forms, `not` / `and` / `or`) against `@supports` for the eight properties the renderer says no to | no line says `MISMATCH`; Chrome says yes to seven of the eight, which is a real difference and not a bug |
 | `lobtime.html` | lobste.rs's shape: a module script, `DOMContentLoaded`, `innerText = ...` on `<time>` | `innerText-set:y/y ... set:N ago` (was `x/y`: innerText was an expando) |
+| `alloc.html` | 40 places where a number from script becomes an allocation: `repeat` / `padStart` / `+=` doubling / `join`, `new Array(n)` and the walks over it, `ArrayBuffer` / typed arrays, `toFixed` / `toPrecision` / `toString(radix)`, deep `JSON.stringify`, recursion. `?case=N` runs one, because a crash takes the whole process with it | every case is a RangeError or an answer; **six used to abort the process and four more ran until killed**. Four differ from Chrome on purpose, see below |
 | `styleprobe.html` | the whole CSSStyleDeclaration and DOMStringMap surface: `length` / `item` / `style[i]`, priorities, `cssFloat`, vendor prefixes, custom properties, `cssText` both ways, `in`, dataset keys / delete | every line matches Chrome except `background` shorthand expansion, `webkitTransform` aliasing to `transform`, and dataset key order (sorted here) |
+
+`alloc.html`'s four deliberate differences from Chrome, all of them tobira
+answering `RangeError` where Chrome answers: a walk over an array whose
+`length` is huge but which holds nothing (`join`, `indexOf`, `includes`,
+`lastIndexOf`), because arrays live in a property map here and a builtin makes
+them dense; and `JSON.stringify` past 500 levels, because the serializer
+recurses on the native stack (Chrome reaches about 100000, then throws the
+same error). Chrome itself takes over 25 seconds -- the harness gives up -- on
+seven of the cases tobira refuses outright. One case is a plain bug kept in
+view: `JSON.parse` of 100000 nested arrays is a `TypeError` here and parses in
+Chrome.
 
 `capture.html`, Chrome: `start win-cap:1:w doc-cap:1:#document a-cap:1:a
 b-cap:1:b c-cap:2:c c-bub:2:c b-bub:3:b b-onprop:3 a-bub:3:a doc-bub:3:#document

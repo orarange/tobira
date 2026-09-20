@@ -359,6 +359,9 @@ built-ins/Number/prototype/toExponential/nan.js
 built-ins/Number/prototype/toExponential/prop-desc.js
 built-ins/Number/prototype/toExponential/undefined-fractiondigits.js
 built-ins/Number/prototype/toFixed/S15.7.4.5_A1.1_T02.js
+built-ins/Number/prototype/toFixed/S15.7.4.5_A1.3_T01.js
+built-ins/Number/prototype/toFixed/S15.7.4.5_A1.3_T02.js
+built-ins/Number/prototype/toFixed/S15.7.4.5_A1.4_T01.js
 built-ins/Number/prototype/toFixed/exactness.js
 built-ins/Number/prototype/toFixed/prop-desc.js
 built-ins/Number/prototype/toFixed/return-type.js

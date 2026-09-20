@@ -1521,6 +1521,8 @@ pub struct Vm {
     callables: HashMap<RawGcRef, Callable>,
     string_cache: HashMap<String, GcRef<JsString>>,
     fuel: u32,
+    /// The objects `JSON.stringify` is inside of, outermost first.
+    json_stack: Vec<GcRef<JsObject>>,
     object_prototype: Option<GcRef<JsObject>>,
     /// One `import.meta` per module URL.
     import_meta: HashMap<String, GcRef<JsObject>>,
@@ -2063,6 +2065,26 @@ const MAX_CALL_FRAMES: usize = 10_000;
 /// wedge the browser) without making it a lifetime quota.
 const TURN_FUEL: u32 = 1_000_000;
 
+/// A number a page hands over must never become an allocation unchecked:
+/// `"x".repeat(Infinity)` or `new ArrayBuffer(1e12)` aborted the process, which
+/// no `catch` sees, so one line of script took the browser down. Past these
+/// sizes it is the RangeError Chrome gives. V8's longest string is 2^29 - 24
+/// code units; its buffers may be larger than this, and then fail to allocate
+/// with the same RangeError.
+const MAX_STRING_LENGTH: usize = (1 << 29) - 24;
+const MAX_ARRAY_BUFFER_LENGTH: usize = 1 << 31;
+/// Measured: the browser's main thread survives 20000 levels of this
+/// recursion and aborts before 50000; a test thread's smaller stack takes
+/// 1000 and overflows at 2000. The frames are fat, and the call may already
+/// be deep inside script, so the cap is half the smallest measured floor.
+/// Chrome reaches about 100000 before its own RangeError; a page that means
+/// its JSON to be read nests tens of levels, not hundreds.
+const MAX_JSON_DEPTH: usize = 500;
+
+fn invalid_string_length() -> VmError {
+    VmError::RangeError("Invalid string length".to_string())
+}
+
 /// How many escaped job errors are kept for the host to collect.
 const MAX_RECORDED_JOB_ERRORS: usize = 8;
 
@@ -2105,6 +2127,7 @@ impl Vm {
             callables: HashMap::new(),
             string_cache: HashMap::new(),
             fuel: TURN_FUEL,
+            json_stack: Vec::new(),
             object_prototype: None,
             import_meta: HashMap::new(),
             function_prototype: None,
@@ -2937,6 +2960,7 @@ impl Vm {
             current_script_src: _,
             current_script_node: _,
             fuel: _,
+            json_stack,
             random_state: _,
             delivering_mutations: _,
             delivering_slotchange: _,
@@ -2965,6 +2989,7 @@ impl Vm {
 
         stack.trace(tracer);
         frames.trace(tracer);
+        json_stack.trace(tracer);
         pending_call_receiver.trace(tracer);
         generator_outcome.trace(tracer);
 
@@ -8886,7 +8911,12 @@ impl Vm {
         let lhs = self.to_primitive(&lhs, None)?;
         let rhs = self.to_primitive(&rhs, None)?;
         if matches!(lhs, Value::String(_)) || matches!(rhs, Value::String(_)) {
-            let text = format!("{}{}", self.to_string(&lhs), self.to_string(&rhs));
+            let (left, right) = (self.to_string(&lhs), self.to_string(&rhs));
+            // `s += s` in a loop doubles: forty rounds is a terabyte.
+            if left.len() + right.len() > MAX_STRING_LENGTH {
+                return Err(invalid_string_length());
+            }
+            let text = format!("{left}{right}");
             let string_value = self.make_string_value(&text);
             self.stack.push(string_value);
         } else {
@@ -10157,12 +10187,11 @@ impl Vm {
             .first()
             .map(|value| self.to_number(value))
             .unwrap_or(0.0);
-        let length = if length.is_finite() && length >= 0.0 {
-            length as usize
-        } else {
-            0
-        };
-        Ok(self.make_array_buffer(length))
+        let length = if length.is_nan() { 0.0 } else { length.trunc() };
+        if length < 0.0 || length > MAX_ARRAY_BUFFER_LENGTH as f64 {
+            return Err(VmError::RangeError("Array buffer allocation failed".to_string()));
+        }
+        Ok(self.make_array_buffer(length as usize))
     }
 
     fn array_buffer_slice(&mut self, this: &Value, args: &[Value]) -> Result<Value, VmError> {
@@ -10239,11 +10268,11 @@ impl Vm {
             // new T(length)
             Some(value) => {
                 let n = self.to_number(&value);
-                let length = if n.is_finite() && n >= 0.0 {
-                    n as usize
-                } else {
-                    0
-                };
+                let n = if n.is_nan() { 0.0 } else { n.trunc() };
+                if n < 0.0 || n > (MAX_ARRAY_BUFFER_LENGTH / bytes_per_element) as f64 {
+                    return Err(VmError::RangeError(format!("Invalid typed array length: {n}")));
+                }
+                let length = n as usize;
                 let buffer = self.make_array_buffer(length * bytes_per_element);
                 self.make_typed_array(kind, buffer, 0, length)
             }
@@ -12805,15 +12834,19 @@ impl Vm {
                     None | Some(Value::Undefined) => ",".to_string(),
                     Some(value) => self.to_string(value),
                 };
-                let joined = values
+                let parts = values
                     .iter()
                     .map(|value| match value {
                         Value::Undefined | Value::Null => String::new(),
                         other => self.to_string(other),
                     })
-                    .collect::<Vec<_>>()
-                    .join(&separator);
-                Ok(self.make_string_value(&joined))
+                    .collect::<Vec<_>>();
+                let total = parts.iter().map(String::len).sum::<usize>()
+                    + separator.len().saturating_mul(parts.len().saturating_sub(1));
+                if total > MAX_STRING_LENGTH {
+                    return Err(invalid_string_length());
+                }
+                Ok(self.make_string_value(&parts.join(&separator)))
             }
             BuiltinId::ArrayProtoSlice => {
                 let values = self.array_like_to_vec(&this_value)?;
@@ -13126,12 +13159,13 @@ impl Vm {
             BuiltinId::NumberProtoToFixed => {
                 let number = self.to_number(&this_value);
                 let digits = self.number_arg(&args, 0);
-                let digits = if digits.is_nan() {
-                    0
-                } else {
-                    (digits as usize).min(100)
-                };
-                Ok(self.make_string_value(&js_to_fixed(number, digits)))
+                let digits = if digits.is_nan() { 0.0 } else { digits.trunc() };
+                if !(0.0..=100.0).contains(&digits) {
+                    return Err(VmError::RangeError(
+                        "toFixed() digits argument must be between 0 and 100".to_string(),
+                    ));
+                }
+                Ok(self.make_string_value(&js_to_fixed(number, digits as usize)))
             }
             BuiltinId::NumberProtoToPrecision => {
                 let number = self.to_number(&this_value);
@@ -13140,8 +13174,20 @@ impl Vm {
                         Ok(self.make_string_value(&Self::format_number(number)))
                     }
                     Some(value) => {
-                        let precision = (self.to_number(value) as usize).clamp(1, 100);
-                        Ok(self.make_string_value(&number_to_precision(number, precision)))
+                        let precision = self.to_number(value);
+                        let precision = if precision.is_nan() { 0.0 } else { precision.trunc() };
+                        if !number.is_finite() {
+                            return Ok(self.make_string_value(&Self::format_number(number)));
+                        }
+                        if !(1.0..=100.0).contains(&precision) {
+                            return Err(VmError::RangeError(
+                                "toPrecision() argument must be between 1 and 100".to_string(),
+                            ));
+                        }
+                        Ok(self.make_string_value(&number_to_precision(
+                            number,
+                            precision as usize,
+                        )))
                     }
                 }
             }
@@ -13149,7 +13195,15 @@ impl Vm {
                 let number = self.to_number(&this_value);
                 let radix = match args.first() {
                     None | Some(Value::Undefined) => 10,
-                    Some(value) => self.to_number(value) as u32,
+                    Some(value) => {
+                        let radix = self.to_number(value).trunc();
+                        if !(2.0..=36.0).contains(&radix) {
+                            return Err(VmError::RangeError(
+                                "toString() radix must be between 2 and 36".to_string(),
+                            ));
+                        }
+                        radix as u32
+                    }
                 };
                 if radix == 10 {
                     Ok(self.make_string_value(&Self::format_number(number)))
@@ -14652,27 +14706,35 @@ impl Vm {
                     .map(|value| self.to_string(value))
                     .filter(|pad| !pad.is_empty())
                     .unwrap_or_else(|| " ".to_string());
-                let mut result = text.clone();
-                while result.chars().count() < target_len {
-                    if builtin == BuiltinId::StringProtoPadStart {
-                        result = format!("{pad}{result}");
-                    } else {
-                        result.push_str(&pad);
-                    }
+                let have = text.chars().count();
+                if target_len <= have {
+                    return Ok(self.make_string_value(&text));
                 }
-                let trimmed = result.chars().take(target_len).collect::<String>();
-                Ok(self.make_string_value(&trimmed))
+                if target_len > MAX_STRING_LENGTH {
+                    return Err(invalid_string_length());
+                }
+                // The filler is the pad repeated and cut to length; it goes
+                // in front whole (`"x".padStart(4, "ab")` is "abax").
+                let filler: String = pad.chars().cycle().take(target_len - have).collect();
+                let result = if builtin == BuiltinId::StringProtoPadStart {
+                    format!("{filler}{text}")
+                } else {
+                    format!("{text}{filler}")
+                };
+                Ok(self.make_string_value(&result))
             }
             BuiltinId::StringProtoRepeat => {
                 let text = self.builtin_string_this(&this_value)?;
-                let count = args
-                    .first()
-                    .map(|value| self.to_number(value) as isize)
-                    .unwrap_or(0);
-                if count < 0 {
-                    return Err(VmError::RangeError(
-                        "repeat count must be non-negative".to_string(),
-                    ));
+                let count = args.first().map(|value| self.to_number(value)).unwrap_or(0.0);
+                let count = if count.is_nan() { 0.0 } else { count.trunc() };
+                if count < 0.0 || count.is_infinite() {
+                    return Err(VmError::RangeError(format!("Invalid count value: {count}")));
+                }
+                if text.is_empty() || count == 0.0 {
+                    return Ok(self.make_string_value(""));
+                }
+                if count > (MAX_STRING_LENGTH / text.len()) as f64 {
+                    return Err(invalid_string_length());
                 }
                 Ok(self.make_string_value(&text.repeat(count as usize)))
             }
@@ -17919,7 +17981,35 @@ impl Vm {
         Ok(Value::Bool(!any))
     }
 
+    /// `JSON.stringify` of one value. An object already being serialized is
+    /// a TypeError, and a nesting deeper than the native stack can follow is
+    /// a RangeError: both used to recurse until the process died.
     fn to_json_value(
+        &mut self,
+        key: &str,
+        value: &Value,
+        replacer: Option<&Value>,
+    ) -> Result<Option<JsonValue>, VmError> {
+        let Value::Object(object) = value else {
+            return self.to_json_value_inner(key, value, replacer);
+        };
+        if self.json_stack.contains(object) {
+            return Err(VmError::TypeError(
+                "Converting circular structure to JSON".to_string(),
+            ));
+        }
+        if self.json_stack.len() >= MAX_JSON_DEPTH {
+            return Err(VmError::RangeError(
+                "Maximum call stack size exceeded".to_string(),
+            ));
+        }
+        self.json_stack.push(*object);
+        let result = self.to_json_value_inner(key, value, replacer);
+        self.json_stack.pop();
+        result
+    }
+
+    fn to_json_value_inner(
         &mut self,
         key: &str,
         value: &Value,
@@ -21568,6 +21658,51 @@ mod tests {
         let mut vm = Vm::new(Heap::new());
         let result = vm.execute(&chunk).map(|_| ());
         (vm, result)
+    }
+
+    /// Every place a number from script became an allocation. Each of these
+    /// used to take the whole process down -- an abort no `catch` can see, so
+    /// one line of script killed the browser -- or run until it did.
+    /// `tools/scripterr/alloc.html` is the same list against Chrome.
+    #[test]
+    fn a_page_cannot_ask_for_an_allocation_that_kills_the_process() {
+        run_script(
+            r#"
+            function thrown(f) { try { f(); return "no"; } catch (e) { return e.name; } }
+            assert(thrown(function () { "x".repeat(Infinity); }) === "RangeError");
+            assert(thrown(function () { "x".repeat(2147483647); }) === "RangeError");
+            assert(thrown(function () { "x".repeat(-1); }) === "RangeError");
+            assert(thrown(function () { "x".padStart(4294967295); }) === "RangeError");
+            assert(thrown(function () { "x".padEnd(4294967295, "ab"); }) === "RangeError");
+            assert(thrown(function () { new ArrayBuffer(1e12); }) === "RangeError");
+            assert(thrown(function () { new Uint8Array(1e12); }) === "RangeError");
+            assert(thrown(function () { var s = "x"; for (var i = 0; i < 40; i++) s += s; }) === "RangeError");
+            assert(thrown(function () { new Array(65537).join("x".repeat(65536)); }) === "RangeError");
+            assert(thrown(function () { (1).toFixed(1e9); }) === "RangeError");
+            assert(thrown(function () { (1).toPrecision(1e9); }) === "RangeError");
+            assert(thrown(function () { (1).toString(1e9); }) === "RangeError");
+            assert(thrown(function () { (1).toString(1); }) === "RangeError");
+            var cycle = {}; cycle.self = cycle;
+            assert(thrown(function () { JSON.stringify(cycle); }) === "TypeError");
+            assert(thrown(function () {
+              var o = {}, c = o;
+              for (var i = 0; i < 2000; i++) { c.a = {}; c = c.a; }
+              JSON.stringify(o);
+            }) === "RangeError");
+
+            // ... and the ordinary sizes still work.
+            assert("ab".repeat(3) === "ababab");
+            assert("x".repeat(0) === "");
+            assert("x".padStart(4, "ab") === "abax");
+            assert("x".padEnd(4, "ab") === "xaba");
+            assert("abc".padStart(2) === "abc");
+            assert((1.005).toFixed(2) === "1.00");
+            assert((255).toString(16) === "ff");
+            assert((1).toPrecision(3) === "1.00");
+            assert(new Uint8Array(4).length === 4);
+            assert(JSON.stringify({ a: [1, 2] }) === '{"a":[1,2]}');
+            "#,
+        );
     }
 
     /// test262's first find: 2^32 - 1 is not an array index. `length` became

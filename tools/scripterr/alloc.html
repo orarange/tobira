@@ -1,0 +1,58 @@
+<html><body><pre id="out">start</pre>
+<script>
+// Places where a number from script becomes an allocation. `?case=N` runs one
+// (a crash takes the process, so a browser under test gets them one by one);
+// without it, all of them. Each line: name=result, where result is the error
+// name, or ok:<what came back>.
+var CASES = [
+  ["new-array-4e9",       function () { return new Array(4294967295).length; }],
+  ["new-array-join",      function () { return new Array(4294967295).join("").length; }],
+  ["length-set-join",     function () { var a = []; a.length = 4294967295; return a.join("").length; }],
+  ["index-4294967294",    function () { var a = []; a[4294967294] = 1; return a.indexOf(1); }],
+  ["array-fill",          function () { return new Array(4294967295).fill(0).length; }],
+  ["array-from-length",   function () { return Array.from({ length: 4294967295 }).length; }],
+  ["array-map",           function () { return new Array(4294967295).map(function (x) { return x; }).length; }],
+  ["array-slice",         function () { return new Array(4294967295).slice(0).length; }],
+  ["array-concat",        function () { return new Array(4294967295).concat([1]).length; }],
+  ["array-reverse",       function () { return new Array(4294967295).reverse().length; }],
+  ["array-sort",          function () { return new Array(4294967295).sort().length; }],
+  ["spread-huge",         function () { return [].concat.apply([], new Array(4294967295)).length; }],
+  ["apply-array-like",    function () { return Math.max.apply(null, { length: 4294967295 }); }],
+  ["repeat-2e9",          function () { return "x".repeat(2147483647).length; }],
+  ["repeat-infinity",     function () { return "x".repeat(Infinity).length; }],
+  ["repeat-long-2e9",     function () { return "xxxxxxxxxxxxxxxx".repeat(1073741824).length; }],
+  ["padStart-4e9",        function () { return "x".padStart(4294967295).length; }],
+  ["padEnd-4e9",          function () { return "x".padEnd(4294967295, "ab").length; }],
+  ["arraybuffer-1e12",    function () { return new ArrayBuffer(1e12).byteLength; }],
+  ["arraybuffer-8e9",     function () { return new ArrayBuffer(8e9).byteLength; }],
+  ["uint8array-1e12",     function () { return new Uint8Array(1e12).length; }],
+  ["float64array-4e9",    function () { return new Float64Array(4294967295).length; }],
+  ["join-long-sep",       function () { var s = "x".repeat(65536); return new Array(65537).join(s).length > 0; }],
+  ["string-doubling",     function () { var s = "x"; for (var i = 0; i < 40; i++) s += s; return s.length; }],
+  ["split-limit",         function () { return "a,b".split(",", 4294967295).length; }],
+  ["json-deep",           function () { var o = {}; var c = o; for (var i = 0; i < 100000; i++) { c.a = {}; c = c.a; } return JSON.stringify(o).length > 0; }],
+  ["json-parse-deep",     function () { return JSON.parse("[".repeat(100000) + "]".repeat(100000)).length; }],
+  ["recursion",           function () { function f() { return f() + 1; } return f(); }],
+  ["tofixed-100",         function () { return (1).toFixed(100).length; }],
+  ["tofixed-1e9",         function () { return (1).toFixed(1e9).length; }],
+  ["toprecision-1e9",     function () { return (1).toPrecision(1e9).length; }],
+  ["tostring-radix-1e9",  function () { return (1).toString(1e9); }],
+  ["regexp-quantifier",   function () { return /a{4294967295}/.test("a"); }],
+  ["string-fromcharcode", function () { return String.fromCharCode.apply(null, new Array(4294967295)).length; }],
+  ["map-many",            function () { return new Set(new Array(4294967295)).size; }],
+  ["object-keys-huge",    function () { return Object.keys(new Array(4294967295)).length; }],
+  ["array-of-length-arg", function () { return Array.apply(null, { length: 4294967295 }).length; }],
+  ["copyWithin",          function () { return new Array(4294967295).copyWithin(0, 1).length; }],
+  ["array-includes",      function () { return new Array(4294967295).includes(1); }],
+  ["array-lastIndexOf",   function () { return new Array(4294967295).lastIndexOf(1); }]
+];
+var only = (location.search.match(/case=(\d+)/) || [])[1];
+var out = document.getElementById("out");
+out.textContent = "cases=" + CASES.length;
+for (var i = 0; i < CASES.length; i++) {
+  if (only !== undefined && String(i) !== only) continue;
+  var r, t0 = Date.now();
+  try { r = "ok:" + CASES[i][1](); } catch (e) { r = (e && e.name) || String(e); }
+  out.textContent += "\n" + i + " " + CASES[i][0] + "=" + r + " " + (Date.now() - t0 > 2000 ? "SLOW" : "");
+}
+</script></body></html>
