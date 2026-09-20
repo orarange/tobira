@@ -1,0 +1,44 @@
+<html><head><style>
+body{margin:0;font:16px Arial;width:800px}
+div{background:#eee;margin:0}
+/* Half-leading: the gap between `line-height` and the face's own content area
+   is split above and below the text. Where the halves land decides the
+   baseline, and a pixel here is a pixel on every line of a long page. */
+.lh10{line-height:10px} .lh16{line-height:16px} .lh20{line-height:20px}
+.lh24{line-height:24px} .lh1{line-height:1} .lh15{line-height:1.5}
+.f10{font-size:10px} .f13{font-size:13px} .f22{font-size:22px}
+.f10pt{font-size:10pt} .f9pt{font-size:9pt}
+.mono{font-family:monospace} .serif{font-family:Georgia,serif}
+.tall{line-height:40px} .neg{line-height:8px;font-size:24px}
+span{background:#cdf}
+</style></head><body>
+<div id="a" class="lh16">Hxy</div>
+<div id="b" class="lh10">Hxy</div>
+<div id="c" class="lh24">Hxy</div>
+<div id="d" class="lh1">Hxy</div>
+<div id="e" class="lh15">Hxy</div>
+<div id="f" class="f10 lh16">Hxy</div>
+<div id="g" class="f22 lh24">Hxy</div>
+<div id="h" class="f10pt">Hxy</div>
+<div id="i" class="f9pt">Hxy</div>
+<div id="j" class="mono">Hxy</div>
+<div id="k" class="serif">Hxy</div>
+<div id="l" class="tall">Hxy</div>
+<div id="m" class="neg">Hxy</div>
+<div id="n">Hxy<span id="ns" class="f10">small</span>Hxy</div>
+<div id="o">Hxy<span id="os" class="f22">big</span>Hxy</div>
+<div id="p" class="lh10">Hxy<span id="ps" class="f22">big</span>Hxy</div>
+<!-- Eight rows of the same thing: where the drift shows up. -->
+<div id="r1" class="f9pt">row</div><div id="r2" class="f9pt">row</div>
+<div id="r3" class="f9pt">row</div><div id="r4" class="f9pt">row</div>
+<div id="r5" class="f9pt">row</div><div id="r6" class="f9pt">row</div>
+<div id="r7" class="f9pt">row</div><div id="r8" class="f9pt">row</div>
+<pre id="out"></pre>
+<script>
+var ids = 'a b c d e f g h i j k l m n o p ns os ps r1 r4 r8'.split(' ');
+document.getElementById('out').textContent = ids.map(function (id) {
+  var r = document.getElementById(id).getBoundingClientRect();
+  return id + ' ' + Math.round(r.x) + ',' + Math.round(r.y) + ' ' +
+         Math.round(r.width) + 'x' + Math.round(r.height);
+}).join('\n');
+</script></body></html>

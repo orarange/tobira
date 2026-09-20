@@ -1216,6 +1216,18 @@ react.dev だけ撮らんかった一枚が退化しとった。
   - HN（web font 無し）の差分マスクを見たら、**一行ずつ下にずれて二重写し**に
     なっとった。行の高さの累積誤差で、下に行くほど開く。つまり底は
     **行の高さと leading**。いま追っとる `sup` / `g2` / `g4` の束と同じ根。
+- **leading の検体**（2026-09-20、`tools/geom/leading.html`、9/22）。
+  `line-height` と face の content area の差（half-leading）を、九つの寸法・
+  三つの family・短い行に背の高い inline・同じ行を八本、で測る。分かったこと:
+  - **等幅の `line-height: normal` が 19 対 Chrome 16**。ただし Chrome の
+    generic `monospace` は Consolas でも Courier New でもない箱を返す
+    （16px 指定で高さ 24）。Chrome 側の既定フォント寸法の癖が絡んどるので、
+    face を合わせる前にそこを解く必要がある。**未解決**。
+  - `line-height:10px` の行に 22px の inline を入れると Chrome 12・tobira 14。
+    背の高い inline を短い行がどう飲み込むかが違う。`sup` の残りと同じ族。
+  - **同じ行を八本並べても高さは一致した**（どちらも 14px）。HN で見えた
+    二重写しは、単純な行の積み上げやのうて別の原因（表の行か padding か）。
+    次に HN を追うときはそこから。
 - **WPT の reftest を走らせる計器**（2026-09-20、`tools/wpt/reftest.py`）。
   reftest は「test と ref が同じ絵になるか」なので **browser は一つで足りる**。
   tobira に両方描かせて画素完全一致を見る（同じエンジンが両方描くので
