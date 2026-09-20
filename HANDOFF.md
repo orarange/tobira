@@ -1216,6 +1216,29 @@ react.dev だけ撮らんかった一枚が退化しとった。
   - HN（web font 無し）の差分マスクを見たら、**一行ずつ下にずれて二重写し**に
     なっとった。行の高さの累積誤差で、下に行くほど開く。つまり底は
     **行の高さと leading**。いま追っとる `sup` / `g2` / `g4` の束と同じ根。
+- **次に手を付ける二つ（`layout.rs`、Mac が読んで見つけた）**。どちらも
+  「行の高さ」の一本で、実頁の症状に直結する:
+  - ① **`line_height_from_ratio` が整数 px に丸めとる**（7220 付近）。
+    `font-size:16px; line-height:1.15` は 18.4px やのに **18 になる**。
+    `font_size_mpx` を 1/10000 にした精度が、ここで捨てられとる。
+    一行 0.4px が積もって、WPT の `fractional-line-height` が **8px 高い**、
+    HN の差分が「下に行くほど開く二重写し」、HANDOFF の
+    「Wikipedia 二千行で 246px」に繋がっとると思われる。
+    **直し方**: 戻り値を mpx にして px に落とすのは最後だけ。ただし
+    **行の積み上げ（`cursor_y`）も mpx で持たんと意味が無い**ので、
+    font-size の改名 refactor より広い。layout.rs 15k 行の座標計算に効く。
+    一回のセッションを丸ごと充てる仕事。
+  - ② **負の half-leading が 0 に潰されとる**（`below_baseline`、7215）。
+    `line-height` が face の自然な高さより小さいと leading は負で、仕様は
+    それを半分ずつ上下に配る（字が行からはみ出す）。`saturating_sub` が
+    それを 0 にしとる。WPT の `vertical-align-negative-leading-001` の名前が
+    そのまま症状。
+    **一度やって戻した**（2026-09-20）: `below_baseline` だけ符号付きにして
+    `above_baseline` を足したら、`leading.html` の `m`
+    （`line-height:8px; font-size:24px`）が **8 → 12 に悪化**した。
+    `emit_line` の `above` / `below` は u32 で、**片側だけ符号付きにすると
+    行箱が両側に膨らむ**。直すなら `emit_line` の積算ごと符号付きにする
+    こと。①と一緒にやるのが筋。
 - **leading の検体**（2026-09-20、`tools/geom/leading.html`、9/22）。
   `line-height` と face の content area の差（half-leading）を、九つの寸法・
   三つの family・短い行に背の高い inline・同じ行を八本、で測る。分かったこと:
