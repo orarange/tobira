@@ -55,6 +55,28 @@ TOBIRA_SETTLE_MS=2000    38.05 CPU s   57.93 s wall   (the default)
 TOBIRA_DYNAMIC_SCRIPTS=0 37.72 CPU s   61.78 s wall   (so: not the scripts)
 ```
 
+### What the settle actually spends it on (measured, 2026-09-20)
+
+Not the frame count -- the cost of one layout. Varying the budget:
+
+| budget | geometry feeds | tobira CPU |
+|-------:|---------------:|-----------:|
+| 0 | 1 | 6.06 s |
+| 250 ms | 6 | 11.14 s |
+| 500 ms | 10 | 15.00 s |
+| 1000 ms | 18 | 22.08 s |
+| 2000 ms | 35 | 38.09 s |
+
+Straight line: **0.93 CPU seconds per feed**, on a 5.6 s base. Each feed is
+one `layout_styled_document` of the whole document, and react.dev is 1846
+elements. The settle runs 125 frames but only 35 of them change anything, so
+**the lever is the price of a layout, not the number of frames.**
+
+Ending the loop early does not help here: the page mutates every three or
+four frames for the whole two seconds (five `setInterval(fn, 60)` of its
+own), so it never holds still. The loop does now stop after eight unchanged
+frames -- which is what "settled" means -- but on this page that never comes.
+
 **Thirty-two CPU seconds are spent settling one page.** The settle loop lays
 the whole document out again every frame (HANDOFF, 2026-09-18) and react.dev
 is 1846 elements. The on-demand layout that `layout_dirty` / `ensure_layout`

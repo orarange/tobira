@@ -339,6 +339,22 @@ receiver の own property 数 1 / 20 / 100 / 400 で回すと、O(幅) の処理
     on-demand layout がこの経路に効いとらん。**次に見る所。**
     ただし settle は react.dev を 62 要素から 1846 へ戻した当のもので、
     **払った代償が正しさを買うとる**。消すんやのうて、効かせる方向で。
+  - **どこに消えとるかを測った（2026-09-20）**: 予算を振ると
+    feeds 1→6→10→18→35 に対し CPU 6.06→11.14→15.00→22.08→38.09 秒。
+    **一次式で、1 フィード = 0.93 CPU 秒**（切片 5.6 秒が素の起動）。
+    1 フィード = `layout_styled_document` 一回（文書全体）。
+    **効く梃子はフレーム数やのうて、layout 一回の値段。**
+    125 フレーム中 35 回しか layout しとらん（`tick` は既に「DOM が
+    変わった時だけ」true を返しとる）。
+  - **早期終了は react.dev には効かん**: 頁自身の `setInterval(fn,60)` が 5 本
+    あって、**三〜四フレームごとに DOM が変わり続ける**ので静止せん。
+    「八フレーム変化無しで抜ける」は入れた（settle の意味はそれなので）が、
+    この頁では発火せん。六枚の DOM は維持（react 1846 / wiki 807 / MDN 736 /
+    vue 599、HN と lobste.rs の差は記事の入れ替わり）。
+  - **次**: `layout_styled_document` を settle の経路で
+    `compute_dirty_roots()` / `relayout()` の増分に載せる
+    （`incremental_restyle_enabled()` は GUI 経路では既定で有効やのに、
+    settle は full layout を直に呼んどる）。**0.93 秒 × 35 回が的**。
 
 ## 試してダメやった方法
 

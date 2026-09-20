@@ -466,12 +466,30 @@ fn load_page_with_options(url: &Url, include_rendered_output: bool) -> Result<Br
         };
         page.set_viewport_size(width, 900);
         feed_geometry(&page, &mut fonts);
+        // "Settled" is meant to be a state, not a stopwatch. A page with a
+        // repeating timer -- react.dev has five `setInterval(fn, 60)` -- is
+        // pending for ever, so waiting for `engine_pending()` to go false
+        // spent the whole budget every time: 125 frames, 35 of them laying
+        // the document out again, 38 CPU seconds against Chrome's 2.6.
+        //
+        // What settling actually means is that the document has stopped
+        // changing. Once it has held still for QUIET_FRAMES frames there is
+        // nothing left for another frame to reveal, whatever the timers are
+        // still doing.
+        const QUIET_FRAMES: u32 = 8;
         let mut now_ms = 0u64;
         let mut frames = 0u32;
+        let mut quiet = 0u32;
         while page.engine_pending() && now_ms < budget_ms {
             now_ms += 16;
             if page.tick(now_ms) {
                 feed_geometry(&page, &mut fonts);
+                quiet = 0;
+            } else {
+                quiet += 1;
+                if quiet >= QUIET_FRAMES {
+                    break;
+                }
             }
             frames += 1;
         }
