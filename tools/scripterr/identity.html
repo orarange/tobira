@@ -1,0 +1,16 @@
+<div id="c"><p id="x">t</p></div><pre id="out"></pre><script>
+var L=[]; function t(n,f){ try{ L.push(n+"="+f()); }catch(e){ L.push(n+"!"+e.name); } }
+var a=document.getElementById("x"), b=document.getElementById("x");
+t("getElementById-twice", function(){ return a === b; });
+t("parentNode-twice", function(){ return a.parentNode === a.parentNode; });
+t("parent-is-container", function(){ return a.parentNode === document.getElementById("c"); });
+t("querySelector-vs-byId", function(){ return document.querySelector("#x") === a; });
+t("children-vs-byId", function(){ return document.getElementById("c").children[0] === a; });
+t("ownerDocument", function(){ return a.ownerDocument === document; });
+t("body-twice", function(){ return document.body === document.body; });
+t("html-parent-is-doc", function(){ return document.documentElement.parentNode === document; });
+t("contains", function(){ return document.getElementById("c").contains(a); });
+t("map-key", function(){ var m=new Map(); m.set(a,1); return m.get(b); });
+t("target-identity", function(){ var seen=null; a.addEventListener("z", function(e){ seen=e.target; }); a.dispatchEvent(new Event("z")); return seen === a; });
+document.getElementById("out").textContent = L.join(" | ");
+</script>

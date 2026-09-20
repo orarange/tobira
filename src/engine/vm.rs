@@ -19073,6 +19073,17 @@ impl Vm {
     }
 
     fn make_dom_node_value(&mut self, node_id: NodeId) -> Value {
+        // The document is node 0, and it already has a wrapper: the
+        // `document` global. Walking up to it from `<html>` used to make a
+        // second, Node-class one, so `document.documentElement.parentNode
+        // === document` was false and `composedPath().indexOf(document)` was
+        // -1. One node is one object, however it is reached.
+        if node_id.0 == 0
+            && let Some(document) = self.globals.get("document")
+            && matches!(document, Value::Object(_))
+        {
+            return document.clone();
+        }
         // Return the interned wrapper so the same node compares `===` equal and
         // keeps any expando properties across accesses.
         if let Some(existing) = self.node_wrappers.get(&node_id.0) {

@@ -1978,6 +1978,60 @@ dom/nodes/Document-createComment.html::createComment("a -- b")
 dom/nodes/Document-createComment.html::createComment("a-")
 dom/nodes/Document-createComment.html::createComment(null)
 dom/nodes/Document-createComment.html::createComment(undefined)
+dom/nodes/Document-createEvent.https.html::BEFOREUNLOADEVENT should be an alias for BeforeUnloadEvent.
+dom/nodes/Document-createEvent.https.html::BeforeUnloadEvent should be an alias for BeforeUnloadEvent.
+dom/nodes/Document-createEvent.https.html::COMPOSITIONEVENT should be an alias for CompositionEvent.
+dom/nodes/Document-createEvent.https.html::CUSTOMEVENT should be an alias for CustomEvent.
+dom/nodes/Document-createEvent.https.html::CompositionEvent should be an alias for CompositionEvent.
+dom/nodes/Document-createEvent.https.html::CustomEvent should be an alias for CustomEvent.
+dom/nodes/Document-createEvent.https.html::DRAGEVENT should be an alias for DragEvent.
+dom/nodes/Document-createEvent.https.html::DragEvent should be an alias for DragEvent.
+dom/nodes/Document-createEvent.https.html::EVENT should be an alias for Event.
+dom/nodes/Document-createEvent.https.html::EVENTS should be an alias for Event.
+dom/nodes/Document-createEvent.https.html::Event should be an alias for Event.
+dom/nodes/Document-createEvent.https.html::Events should be an alias for Event.
+dom/nodes/Document-createEvent.https.html::FOCUSEVENT should be an alias for FocusEvent.
+dom/nodes/Document-createEvent.https.html::FocusEvent should be an alias for FocusEvent.
+dom/nodes/Document-createEvent.https.html::HASHCHANGEEVENT should be an alias for HashChangeEvent.
+dom/nodes/Document-createEvent.https.html::HTMLEVENTS should be an alias for Event.
+dom/nodes/Document-createEvent.https.html::HTMLEvents should be an alias for Event.
+dom/nodes/Document-createEvent.https.html::HashChangeEvent should be an alias for HashChangeEvent.
+dom/nodes/Document-createEvent.https.html::KEYBOARDEVENT should be an alias for KeyboardEvent.
+dom/nodes/Document-createEvent.https.html::KeyboardEvent should be an alias for KeyboardEvent.
+dom/nodes/Document-createEvent.https.html::MESSAGEEVENT should be an alias for MessageEvent.
+dom/nodes/Document-createEvent.https.html::MOUSEEVENT should be an alias for MouseEvent.
+dom/nodes/Document-createEvent.https.html::MOUSEEVENTS should be an alias for MouseEvent.
+dom/nodes/Document-createEvent.https.html::MessageEvent should be an alias for MessageEvent.
+dom/nodes/Document-createEvent.https.html::MouseEvent should be an alias for MouseEvent.
+dom/nodes/Document-createEvent.https.html::MouseEvents should be an alias for MouseEvent.
+dom/nodes/Document-createEvent.https.html::STORAGEEVENT should be an alias for StorageEvent.
+dom/nodes/Document-createEvent.https.html::SVGEVENTS should be an alias for Event.
+dom/nodes/Document-createEvent.https.html::SVGEvents should be an alias for Event.
+dom/nodes/Document-createEvent.https.html::StorageEvent should be an alias for StorageEvent.
+dom/nodes/Document-createEvent.https.html::TOUCHEVENT should be an alias for TouchEvent.
+dom/nodes/Document-createEvent.https.html::TouchEvent should be an alias for TouchEvent.
+dom/nodes/Document-createEvent.https.html::UIEVENT should be an alias for UIEvent.
+dom/nodes/Document-createEvent.https.html::UIEVENTS should be an alias for UIEvent.
+dom/nodes/Document-createEvent.https.html::UIEvent should be an alias for UIEvent.
+dom/nodes/Document-createEvent.https.html::UIEvents should be an alias for UIEvent.
+dom/nodes/Document-createEvent.https.html::beforeunloadevent should be an alias for BeforeUnloadEvent.
+dom/nodes/Document-createEvent.https.html::compositionevent should be an alias for CompositionEvent.
+dom/nodes/Document-createEvent.https.html::customevent should be an alias for CustomEvent.
+dom/nodes/Document-createEvent.https.html::dragevent should be an alias for DragEvent.
+dom/nodes/Document-createEvent.https.html::event should be an alias for Event.
+dom/nodes/Document-createEvent.https.html::events should be an alias for Event.
+dom/nodes/Document-createEvent.https.html::focusevent should be an alias for FocusEvent.
+dom/nodes/Document-createEvent.https.html::hashchangeevent should be an alias for HashChangeEvent.
+dom/nodes/Document-createEvent.https.html::htmlevents should be an alias for Event.
+dom/nodes/Document-createEvent.https.html::keyboardevent should be an alias for KeyboardEvent.
+dom/nodes/Document-createEvent.https.html::messageevent should be an alias for MessageEvent.
+dom/nodes/Document-createEvent.https.html::mouseevent should be an alias for MouseEvent.
+dom/nodes/Document-createEvent.https.html::mouseevents should be an alias for MouseEvent.
+dom/nodes/Document-createEvent.https.html::storageevent should be an alias for StorageEvent.
+dom/nodes/Document-createEvent.https.html::svgevents should be an alias for Event.
+dom/nodes/Document-createEvent.https.html::touchevent should be an alias for TouchEvent.
+dom/nodes/Document-createEvent.https.html::uievent should be an alias for UIEvent.
+dom/nodes/Document-createEvent.https.html::uievents should be an alias for UIEvent.
 dom/nodes/Document-createProcessingInstruction.html::Document.createProcessingInstruction in HTML documents
 dom/nodes/Document-createTextNode.html::createTextNode("-b")
 dom/nodes/Document-createTextNode.html::createTextNode("\v")

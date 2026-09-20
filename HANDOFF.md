@@ -1245,7 +1245,19 @@ react.dev だけ撮らんかった一枚が退化しとった。
   `object is not callable` 68 本は**二つの別の原因**（`handleEvent` 形式の
   リスナーと `createEvent`）から出とった。内訳は「次に見る場所」を絞る道具で、
   「原因が一つ」の証拠やない。
-- **`composedPath()` に `window` が入っとらん**（2026-09-20、未修正）。
+- **node 0（document）の wrapper が二つあった**（2026-09-20、修正済み）。
+  `<html>` から親を辿ると `make_dom_node_value(NodeId(0))` が **Node クラスの
+  二つ目の wrapper** を作っとって、globals の `document` と別物やった。
+  → `document.documentElement.parentNode === document` が false、
+  `composedPath().indexOf(document)` が -1。**一つのノードは一つのオブジェクト**、
+  どう辿っても。node 0 は globals の `document` を返すようにした。
+  - **要素の intern は元から正しかった**（Mac の「要素も別物やないか」という
+    読みを検体で否定。`tools/scripterr/identity.html` が 11 項目中 11 項目
+    Chrome と一致、唯一の違いがこの document の件やった）。
+    `getElementById` 二回・`parentNode` 二回・`querySelector` と `byId`・
+    `children[0]`・`ownerDocument`・`Map` の鍵・`e.target`、全部 `===`。
+- **`composedPath()` に `window` が入っとらん**（2026-09-20、document の
+  同一性だけ直した。`window` が経路に無いのは未修正）。
   ```
   tobira: len=5 b>a>BODY>HTML>#document   last-is-window=false doc-in-path=false
   chrome: len=6 b>a>BODY>HTML>#document>[object Window] last-is-window=true doc-in-path=true
