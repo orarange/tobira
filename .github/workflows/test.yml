@@ -24,9 +24,15 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: cargo test
         shell: bash
+        # The grep keeps only result lines, so a build that does not compile,
+        # or a test binary that aborts, arrived here as `passed= failed=` and
+        # nothing else: twelve runs stayed red and unreadable that way while a
+        # debug build overflowed its stack. Keep the log, and print its tail
+        # whenever no result line came out at all.
         run: |
           cargo test 2>&1 | tr -d '\000' | tee test.log | grep -aE "^test result|FAILED|panicked" \
-            | awk '/^test result/{p+=$4; f+=$6; next} {print} END {print "passed=" p, "failed=" f; exit (f > 0)}'
+            | awk '/^test result/{p+=$4; f+=$6; next} {print} END {if (p == "") {print "no test results"; exit 1} print "passed=" p, "failed=" f; exit (f > 0)}' \
+            || { echo "--- last 60 lines of cargo test ---"; tail -60 test.log; exit 1; }
       - name: html5lib tree construction
         shell: bash
         run: |

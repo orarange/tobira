@@ -1201,6 +1201,19 @@ react.dev だけ撮らんかった一枚が退化しとった。
   - 残りの塊: `Object.getOwnPropertyDescriptor` / `hasOwnProperty` が primitive を
     ToObject せん（22 本。`ObjectKind::Primitive` があるので繋ぐだけ）、
     bigint literal（5 本）、`Math.sumPrecise`（5 本）。
+- **CI が 12 本続けて赤かった**（2026-09-20、a4261a2 〜 ed1db4d、f5df304 で修正）。
+  手元の `cargo test --release` は 1202/0 で通るのに、CI（**debug build**）で
+  `JSON.stringify` の深さ試験が**スタックを溢れさせとった**。**debug は frame が
+  太い**ので、release で測った 500 段では足りん。上限を 200 に下げた
+  （実頁の JSON は数十段。`MAX_JSON_DEPTH` のコメント参照）。
+  - **二重に見落とした**: ① `ship.sh` が `--release` しか回しとらんかった。
+    ② CI の判定が `grep` で結果行だけ拾うので、**ビルドが通らんときも test
+    binary が落ちたときも `passed= failed=` の一行だけ**になって、ログを
+    開くまで何も分からんかった。
+  - 直した: `ship.sh` に `cargo test --lib`（debug）を足す、CI は結果行が
+    一本も無いときに `test.log` の末尾 60 行を出す。
+  - **教訓**: 「CI 緑」と報告する前に `gh run list` を見ること。その日の
+    一本目だけ見て緑と言うたのが 12 本の赤を見逃した原因。
 - **`@font-face` が無い**（2026-09-20 に判明。Mac が気付いた）。`src/` 全体を
   `font-face` / `woff` で grep して **0 件**。`font.rs` は
   `WINDOWS_FAMILY_FILES` と `family_is_installed` で `C:\Windows\Fonts` の中
