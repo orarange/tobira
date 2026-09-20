@@ -24,6 +24,27 @@ if [ -n "$untracked" ] && [ "${SHIP_ALLOW_UNTRACKED:-0}" != "1" ]; then
   exit 3
 fi
 
+# The same look, one step later. `git add -A` sweeps a new file straight
+# past the check above -- it is staged by then, not untracked -- which is how
+# 24 commits in one day went out under an `add` the repo's own rules forbid.
+# Nothing wrong was committed that day, but the day's work had created three
+# new kinds of generated file, and only `.gitignore` stood between them and
+# the history. So: say what is about to be added for the first time, and make
+# somebody agree to it.
+added="$(git diff --cached --name-only --diff-filter=A)"
+if [ -n "$added" ] && [ "${SHIP_ALLOW_NEW:-0}" != "1" ]; then
+  count="$(printf '%s
+' "$added" | wc -l | tr -d ' ')"
+  echo "$count file(s) would be added to the repository for the first time:" >&2
+  printf '%s
+' "$added" | head -40 >&2
+  if [ "$count" -gt 40 ]; then
+    echo "  ... and $((count - 40)) more" >&2
+  fi
+  echo "read the list; if they all belong in the history, set SHIP_ALLOW_NEW=1" >&2
+  exit 4
+fi
+
 # CI builds without --release, and a debug build's stack frames are fatter:
 # a recursion guard tuned on release frames overflowed there, and CI was red
 # for twelve runs while this script reported the suite passing. The engine
