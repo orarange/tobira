@@ -24,6 +24,13 @@ if [ -n "$untracked" ] && [ "${SHIP_ALLOW_UNTRACKED:-0}" != "1" ]; then
   exit 3
 fi
 
+# CI builds without --release, and a debug build's stack frames are fatter:
+# a recursion guard tuned on release frames overflowed there, and CI was red
+# for twelve runs while this script reported the suite passing. The engine
+# crate is where that bites, so it is checked in debug as well.
+cargo test --lib 2>&1 | tr -d '\000' | grep -aE "^test result|FAILED|panicked" \
+  | awk '/^test result/{p+=$4; f+=$6; next} {print} END {if (p == "") {print "debug: no test results"; exit 1} print "debug passed=" p, "failed=" f; exit (f > 0)}'
+
 cargo test --release 2>&1 | tr -d '\000' | grep -aE "^test result|FAILED|panicked" \
   | awk '/^test result/{p+=$4; f+=$6; next} {print} END {print "passed=" p, "failed=" f; exit (f > 0)}'
 TOBIRA_GC_VERIFY=1 cargo test --release 2>&1 | tr -d '\000' | grep -aE "^test result|gc-verify" \

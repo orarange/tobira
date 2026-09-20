@@ -2078,13 +2078,18 @@ const TURN_FUEL: u32 = 1_000_000;
 /// with the same RangeError.
 const MAX_STRING_LENGTH: usize = (1 << 29) - 24;
 const MAX_ARRAY_BUFFER_LENGTH: usize = 1 << 31;
+/// **A debug build's frames are fatter still**: 500 overflowed the stack of
+/// a test thread there, which is how CI stayed red for a day while
+/// `--release` passed locally. The cap has to clear the smallest stack this
+/// code runs on, not the one it was measured on.
+///
 /// Measured: the browser's main thread survives 20000 levels of this
 /// recursion and aborts before 50000; a test thread's smaller stack takes
 /// 1000 and overflows at 2000. The frames are fat, and the call may already
 /// be deep inside script, so the cap is half the smallest measured floor.
 /// Chrome reaches about 100000 before its own RangeError; a page that means
 /// its JSON to be read nests tens of levels, not hundreds.
-const MAX_JSON_DEPTH: usize = 500;
+const MAX_JSON_DEPTH: usize = 200;
 
 /// Built-ins whose declared argument count is not 1, by the property name
 /// they are installed under. Everything absent from here declares one.
