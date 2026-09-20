@@ -643,6 +643,17 @@ pub fn layout_styled_document(
     // up the chain before they are handed out.
     let inline_rects = std::mem::take(&mut context.inline_rects);
     let inline_parents = std::mem::take(&mut context.inline_parents);
+    let inline_rects: std::collections::HashMap<u32, (u32, u32, u32, u32, CursorKind)> =
+        inline_rects
+            .into_iter()
+            .map(|(node_id, mut rect)| {
+                // Opened and never filled: an empty box where it started.
+                if rect.1 == u32::MAX {
+                    rect.1 = rect.3;
+                }
+                (node_id, rect)
+            })
+            .collect();
     let mut folded = inline_rects.clone();
     for (node_id, rect) in &inline_rects {
         let mut walk = inline_parents.get(node_id).copied();
@@ -6718,11 +6729,17 @@ fn apply_inline_marks(
             _ => cursor_x,
         };
         if *open {
+            // Opened, but nothing in it yet: the vertical extent is left
+            // empty (top above bottom) so that the first run inside sets it.
+            // Seeding it with the line's own top instead made every inline box
+            // start where the line starts, so a `<sub>` or a smaller span
+            // reported the whole line's height rather than its own -- 17px for
+            // a 10px span that Chrome gives 11.
             let entry = context.inline_rects.entry(*node_id).or_insert((
                 cursor_x,
-                line_top,
+                u32::MAX,
                 cursor_x,
-                line_top,
+                0,
                 CursorKind::Auto,
             ));
             entry.0 = entry.0.min(cursor_x);
@@ -6732,8 +6749,9 @@ fn apply_inline_marks(
                 entry.2 = entry.2.max(cursor_x);
                 // An element that wrote nothing still has the height of a
                 // line of its own text, which is what a browser reports.
-                if entry.3 == entry.1 {
-                    entry.3 = entry.1.saturating_add(strut_height);
+                if entry.1 == u32::MAX {
+                    entry.1 = line_top;
+                    entry.3 = line_top.saturating_add(strut_height);
                 }
             }
             open_inlines.retain(|id| id != node_id);

@@ -10,6 +10,8 @@ subtracts them.
     python tools/pixel/diff.py g1.html            # one page
     python tools/pixel/diff.py --all              # every geom probe, scored
     python tools/pixel/diff.py --all --bless      # write baseline.tsv
+    python tools/pixel/diff.py --pages            # the six reference pages
+    python tools/pixel/diff.py https://react.dev/ # any URL
 
 A page never reaches 0%: the two engines rasterise glyph edges differently,
 so text areas differ by a few percent no matter what. The number to watch is
@@ -51,6 +53,8 @@ HEIGHT = int(os.environ.get("PIXEL_HEIGHT", "900"))
 THRESHOLD = int(os.environ.get("PIXEL_THRESHOLD", "32"))
 # How much worse than the baseline a page may score before `--all` fails.
 SLACK = float(os.environ.get("PIXEL_SLACK", "0.1"))
+# Both browsers are asked for the same one; "dark" compares the other pair.
+COLOR_SCHEME = os.environ.get("PIXEL_COLOR_SCHEME", "light")
 
 
 def shoot_chrome(url, path):
@@ -64,6 +68,12 @@ def shoot_chrome(url, path):
             "--user-data-dir=" + os.path.join(GEOM, "cud"),
             "--window-size=%d,%d" % (WIDTH, HEIGHT),
             "--virtual-time-budget=2500",
+            # Headless Chrome answers `prefers-color-scheme: dark` whatever
+            # the desktop is set to. Pinning both browsers to light is what
+            # makes the two pictures pictures of the same page: react.dev
+            # otherwise comes back dark from one and light from the other, and
+            # 97% of the pixels differ for no reason worth reading.
+            "--blink-settings=preferredColorScheme=1",
             "--screenshot=" + path,
             url,
         ],
@@ -77,6 +87,7 @@ def shoot_tobira(url, path):
     env = dict(os.environ)
     env["TOBIRA_DUMP_WIDTH"] = str(WIDTH)
     env["TOBIRA_SHOT_HEIGHT"] = str(HEIGHT)
+    env["TOBIRA_COLOR_SCHEME"] = COLOR_SCHEME
     subprocess.run(
         [TOBIRA, "--screenshot", path, url],
         capture_output=True,
@@ -100,9 +111,30 @@ def boxes_from_probe(page):
     return boxes
 
 
+# The six pages every change is checked against. Their content moves under
+# us -- Hacker News and lobste.rs reorder hourly -- so a figure only means
+# something against a shot taken the same day, which is why both browsers are
+# run here rather than compared against a stored image.
+REFERENCE_PAGES = [
+    "https://react.dev/",
+    "https://ja.wikipedia.org/wiki/ブラウザ",
+    "https://developer.mozilla.org/en-US/",
+    "https://vuejs.org/",
+    "https://news.ycombinator.com/",
+    "https://lobste.rs/",
+]
+
+
+def page_url_and_stem(page):
+    """A probe file served locally, or a URL to fetch as it is."""
+    if page.startswith("http://") or page.startswith("https://"):
+        stem = re.sub(r"[^A-Za-z0-9]+", "_", page.split("//", 1)[1]).strip("_")
+        return page, stem[:60]
+    return "http://127.0.0.1:%s/%s" % (PORT, page), page.rsplit(".", 1)[0]
+
+
 def compare(page, keep_image=True):
-    url = "http://127.0.0.1:%s/%s" % (PORT, page)
-    stem = page.rsplit(".", 1)[0]
+    url, stem = page_url_and_stem(page)
     os.makedirs(OUT, exist_ok=True)
     left_path = os.path.join(OUT, stem + ".tobira.png")
     right_path = os.path.join(OUT, stem + ".chrome.png")
@@ -173,7 +205,9 @@ def main():
     bless = "--bless" in args
     args = [a for a in args if a != "--bless"]
 
-    if args == ["--all"]:
+    if args == ["--pages"]:
+        pages = REFERENCE_PAGES
+    elif args == ["--all"]:
         pages = sorted(
             name
             for name in os.listdir(GEOM)

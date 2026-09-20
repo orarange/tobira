@@ -37,7 +37,15 @@ pub(crate) enum MediaCondition {
 /// Read once. Nothing here notices the setting changing mid-session.
 fn prefers_dark() -> bool {
     static DARK: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *DARK.get_or_init(read_system_dark_mode)
+    *DARK.get_or_init(|| match std::env::var("TOBIRA_COLOR_SCHEME") {
+        // Comparing a screenshot against another browser's needs both of them
+        // asked the same question: headless Chrome answers "dark" whatever the
+        // desktop says, so a run that does not pin this compares two different
+        // pages. `tools/pixel/diff.py` sets it.
+        Ok(value) if value.eq_ignore_ascii_case("dark") => true,
+        Ok(value) if value.eq_ignore_ascii_case("light") => false,
+        _ => read_system_dark_mode(),
+    })
 }
 
 #[cfg(target_os = "windows")]

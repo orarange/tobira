@@ -40,6 +40,27 @@ This scores the five pages `cmp.py` cannot (`arrow.html` … `arrow4.html`,
 `mask.html`): they write no `out` block because they are pictures, and a
 picture is exactly what this compares.
 
+## The six reference pages
+
+`--pages` runs the same comparison against react.dev, ja.wikipedia,
+developer.mozilla.org, vuejs.org, news.ycombinator.com and lobste.rs. Their
+content moves under us, so the figure only means anything against a shot
+taken the same day -- which is why both browsers are run each time rather
+than one being compared against a stored image.
+
+First run, 2026-09-20: react.dev **5.83%**, vuejs.org 8.67%, lobste.rs
+10.59%, news.ycombinator.com 11.40%, ja.wikipedia 11.54%, MDN **82.28%**.
+MDN is the outlier because Chrome draws it dark and tobira light: the page
+picks its own theme in script, and the two land differently. The rest is what
+"the DOM matches but the picture does not" actually looks like.
+
+**Both browsers are pinned to `prefers-color-scheme: light`**
+(`--blink-settings=preferredColorScheme=1`, `TOBIRA_COLOR_SCHEME=light`).
+Headless Chrome answers *dark* whatever the desktop says, so without this
+react.dev came back dark from one browser and light from the other and 97% of
+the pixels differed for no reason worth reading. `PIXEL_COLOR_SCHEME=dark`
+compares the other pair.
+
 Knobs: `PIXEL_WIDTH` / `PIXEL_HEIGHT` (1280x900), `PIXEL_THRESHOLD`,
 `PIXEL_SLACK` (0.1 points), `GEOM_PORT`, `CHROME_PATH`, `TOBIRA_PATH`.
 `out/` and the screenshots in it are not committed.
