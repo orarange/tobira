@@ -1233,6 +1233,35 @@ react.dev だけ撮らんかった一枚が退化しとった。
     **最初から試験を見ながら書く方が早い。**
   - 検証は WPT だけやのうて、**`--dump-styled` か画素差分で実際に色が
     変わったことを見る**検体を置くこと。
+  - **`rule.style` は `el.style` の実装を使い回すこと**（Mac の指摘）。
+    どちらも `CSSStyleDeclaration` で、09-18 に面ごと磨いた実装がある
+    （`cssText` / `length` / `item` / 添字 / `getPropertyValue` /
+    `setProperty` の `important` / `getPropertyPriority` / `removeProperty` /
+    `in` / カスタムプロパティ / `cssFloat` / vendor prefix）。**二度書くと
+    片方だけ直る穴ができる**（`createEvent` と `createComment` が同じ腕に
+    おったのと構造が同じ）。
+    - いまの作り: `el.style` は `HostObjectClass::Other("CSSStyleDeclaration")`
+      の host object で、**`handle` は node id**。読み書きは
+      `DomRead::Attribute{name:"style"}` と
+      `DomMutation::SetAttribute` に直結しとる（`vm.rs` の
+      `get_style_property` / `DomStyleSetProperty`）。
+    - **先にやること**: 宣言の「裏」を差し替えられるよう一段抽象する。
+      `declaration_text(slot)` / `set_declaration_text(slot, text)` を作って、
+      裏が **要素の style 属性** か **stylesheet の中の規則** かを slot が
+      決める形に。規則側は `DomRead::RuleStyleText{rule}` /
+      `DomMutation::SetRuleStyleText{rule, text}` を新設。
+    - ついでに `parentRule` が本物になる（`el.style` は `null` が正解、
+      `rule.style` はその規則を指すのが正解。同じ型で両方正しく答えられる）。
+  - **段階**（途中で止めても形になるよう Mac が切った）:
+    ① `styleSheets` → `CSSStyleSheet` → `cssRules` → `CSSStyleRule`
+    （`selectorText` + `style`）**ここで一度測る**（139 本の大半が動くはず）
+    ② `insertRule` / `deleteRule` + `compute_dirty_roots()` への接続
+    → **検体で「実際に色が変わる」を確認**（ここが関所。通してから③へ）
+    ③ `CSSMediaRule` / `CSSImportRule` / `CSSKeyframesRule`
+  - host 側は `stylesheet_text: String` を持っとって `use crate::css` できる
+    （`engine_host.rs`）ので、**規則の表は host が parse して持つ**。
+    エンジンには規則の id だけ渡して wrapper を intern する
+    （node 0 の件で学んだ「一つの実体は一つのオブジェクト」）。
 - **`A | B => ...` の腕は、両方のパターンを見ること**（2026-09-20 の教訓）。
   09-18 に `unreachable pattern` を点検したとき、`"createEvent" |
   "createComment" => stub` の腕を見て「`createComment` は本物が先に拾うので
