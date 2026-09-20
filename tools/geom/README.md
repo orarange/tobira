@@ -62,6 +62,10 @@ Weakest first, which is where to work: `sup` 2/10, `fsize` 3/12, `details`
 `font-size: 0.8333em` computes 13 where Chrome keeps 13.3333, and every text
 width downstream drifts.
 
+These pages only answer for where the boxes are. What they *look* like --
+colour, borders, glyph shapes, what covers what -- is `tools/pixel/diff.py`,
+which screenshots the same pages in both browsers and subtracts them.
+
 **Read which axis is wrong before deciding what a page is telling you.** Three
 of these were misread that way. `tablew` sat at 0/6 and looked like a table
 problem; every width and height in it was already right and only `y` was

@@ -13,3 +13,4 @@ repomix-output*.xml
 
 # cmp.py hands Chrome a throwaway profile; it lands here.
 tools/geom/cud/
+tools/pixel/out/
