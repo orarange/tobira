@@ -67,6 +67,19 @@ Not the frame count -- the cost of one layout. Varying the budget:
 | 1000 ms | 18 | 22.08 s |
 | 2000 ms | 35 | 38.09 s |
 
+**The slope is not the layout.** Timing both halves (`TOBIRA_TIME_LAYOUT=1`)
+says where it really goes:
+
+```
+tick(changed=true)   n=34   48.9 s total   1437 ms each   <-- here
+tick(changed=false)  n=91    0.1 s total      1 ms each
+layout_styled_document n=35   1.5 s total     44 ms each
+```
+
+A whole-document layout costs **44 ms**, not 930. What costs 1.4 seconds is
+applying a snapshot on a frame where the DOM changed: serialising the
+document, parsing it again and rebuilding the styled tree. Thirty-four times.
+
 Straight line: **0.93 CPU seconds per feed**, on a 5.6 s base. Each feed is
 one `layout_styled_document` of the whole document, and react.dev is 1846
 elements. The settle runs 125 frames but only 35 of them change anything, so

@@ -437,12 +437,26 @@ fn load_page_with_options(url: &Url, include_rendered_output: bool) -> Result<Br
         let width = style_viewport_width();
         let mut fonts = crate::font::FontContext::load();
         let feed_geometry = |page: &BrowserPage, fonts: &mut crate::font::FontContext| {
+            // `TOBIRA_TIME_LAYOUT=1` prints what one whole-document layout
+            // costs, with the element count beside it. Measured at 0.93 CPU
+            // seconds a pass on react.dev, which is two orders of magnitude
+            // above what a browser spends on 1846 elements; the question this
+            // answers is whether the cost grows with the element count or
+            // faster than it.
+            let started = std::time::Instant::now();
             let layout = crate::layout::layout_styled_document(
                 &page.styled_document,
                 &page.images,
                 width,
                 fonts,
             );
+            if std::env::var_os("TOBIRA_TIME_LAYOUT").is_some() {
+                eprintln!(
+                    "[layout] {:.1} ms for {} hitboxes",
+                    started.elapsed().as_secs_f64() * 1000.0,
+                    layout.element_hitboxes.len()
+                );
+            }
             let rects: Vec<(usize, f32, f32, f32, f32, f32, f32)> = layout
                 .element_hitboxes
                 .iter()
@@ -482,7 +496,15 @@ fn load_page_with_options(url: &Url, include_rendered_output: bool) -> Result<Br
         let mut quiet = 0u32;
         while page.engine_pending() && now_ms < budget_ms {
             now_ms += 16;
-            if page.tick(now_ms) {
+            let tick_started = std::time::Instant::now();
+            let changed = page.tick(now_ms);
+            if std::env::var_os("TOBIRA_TIME_LAYOUT").is_some() {
+                eprintln!(
+                    "[tick] {:.1} ms (changed: {changed})",
+                    tick_started.elapsed().as_secs_f64() * 1000.0
+                );
+            }
+            if changed {
                 feed_geometry(&page, &mut fonts);
                 quiet = 0;
             } else {
