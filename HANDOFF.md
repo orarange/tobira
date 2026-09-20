@@ -361,9 +361,30 @@ receiver の own property 数 1 / 20 / 100 / 400 で回すと、O(幅) の処理
     DOM が変わったフレームの `apply_script_snapshot`**（HTML を丸ごと
     直列化 → 再パース → styled tree 再構築）。1846 要素の頁で一回 1.4 秒、
     それが 34 回。
-    **次の的はここ**: 変化フレームごとに世界を作り直すのをやめて、
-    `structural_changes` を増分で当てる。`compute_dirty_roots()` /
-    `relayout()` に載せるのは**その後**（layout は既に安い）。
+  - **その 1.4 秒の正体も割った**（同日、`TOBIRA_TIME_LAYOUT=1`）。
+    `apply_script_snapshot` は**増分経路を既に持っとる**
+    （`rebuild_page_from_html_incremental`）のに、react.dev では
+    **34 回中 33 回が断られとった**:
+    ```
+    33 x [apply] not eligible for incremental (changes: 0, order: 1847)
+     1 x [apply] not eligible for incremental (changes: 1, order: 1847)
+        [apply] 1788〜2049 ms (268066 bytes of html)
+    ```
+    **`structural_changes` が空**やから。条件が
+    `!snapshot.structural_changes.is_empty()` なので、**子リストが変わらん
+    変更は全部、全体再構築に落ちる**。React がやっとるのは属性とテキストの
+    書き換えで、`record_childlist_mutation` には載らん。
+    `tick()` の方は `html != self.html_source` で「変わった」と判定するので、
+    **「変わったが増分にできん」の組み合わせが毎フレーム成立する**。
+    → 268KB を parse し直して styled tree を作り直すのが **1.9 秒 × 33 回**。
+    **次の的はここ**: 属性・テキストの変更も増分で当てられるようにする
+    （engine 側に childlist 以外の mutation の記録が要る）。
+    なお **268KB の parse + restyle に 1.9 秒は、それ自体が遅すぎる**
+    （parse は普通 10〜50ms）。増分にするのと別に、**中を割る価値がある**
+    （Mac の読み: セレクタの照合が要素数 × 規則数の総当たりになっとらんか。
+    1846 × 千本 = 180 万回）。こっちは**初回読み込みにも効く**。
+    `compute_dirty_roots()` / `relayout()` に載せるのは**その後**
+    （layout は 44ms で既に安い）。
   - **早期終了は react.dev には効かん**: 頁自身の `setInterval(fn,60)` が 5 本
     あって、**三〜四フレームごとに DOM が変わり続ける**ので静止せん。
     「八フレーム変化無しで抜ける」は入れた（settle の意味はそれなので）が、

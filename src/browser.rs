@@ -97,6 +97,7 @@ impl BrowserPage {
             .as_deref()
             .and_then(|target| Url::parse(target).ok())
             .unwrap_or_else(|| self.url.clone());
+        let apply_started = std::time::Instant::now();
         let rebuilt = if incremental_restyle_enabled()
             && snapshot.navigation_target.is_none()
             && snapshot.soft_navigation_target.is_none()
@@ -125,6 +126,12 @@ impl BrowserPage {
                 &new_node_order,
             )
             .unwrap_or_else(|| {
+                // The incremental path refused this change; the whole
+                // document is built again. `TOBIRA_TIME_LAYOUT=1` says how
+                // often that happens, because it is the expensive answer.
+                if std::env::var_os("TOBIRA_TIME_LAYOUT").is_some() {
+                    eprintln!("[apply] incremental declined -> full rebuild");
+                }
                 rebuild_page_from_html(
                     &url,
                     self.status_code,
@@ -139,6 +146,13 @@ impl BrowserPage {
                 )
             })
         } else {
+            if std::env::var_os("TOBIRA_TIME_LAYOUT").is_some() {
+                eprintln!(
+                    "[apply] not eligible for incremental (changes: {}, order: {})",
+                    snapshot.structural_changes.len(),
+                    snapshot.node_order.len()
+                );
+            }
             rebuild_page_from_html(
                 &url,
                 self.status_code,
@@ -152,6 +166,13 @@ impl BrowserPage {
                 snapshot.node_order.clone(),
             )
         };
+        if std::env::var_os("TOBIRA_TIME_LAYOUT").is_some() {
+            eprintln!(
+                "[apply] {:.1} ms ({} bytes of html)",
+                apply_started.elapsed().as_secs_f64() * 1000.0,
+                snapshot.html.len()
+            );
+        }
         *self = rebuilt;
         self.scroll_y = snapshot.scroll_y;
         self.engine_pending = pending;
