@@ -15,3 +15,4 @@ repomix-output*.xml
 tools/geom/cud/
 tools/pixel/out/
 tools/wpt/out/
+tests/fixtures/wpt/**/*.any.html

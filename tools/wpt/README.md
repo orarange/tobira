@@ -1,4 +1,52 @@
-# Web Platform Tests, the reftests
+# Web Platform Tests
+
+Two runners, because WPT holds two kinds of test.
+
+- `harness.py` runs the **script tests** (`testharness.js`): a page makes
+  assertions and reports each as pass or fail, the same shape as test262.
+- `reftest.py` runs the **reftests**: two pages that must draw identically.
+
+Both keep a baseline of what passes and fail when something that passed
+stops passing.
+
+## The script tests
+
+```
+python tools/wpt/harness.py workers          # everything under that path
+python tools/wpt/harness.py css/cssom --bless
+python tools/wpt/harness.py                  # all of it
+```
+
+WPT's own `testharnessreport.js` reports to an external runner over
+`postMessage`. Ours -- the one file under `resources/` that is not theirs --
+writes the results into a `<pre id="__wpt_out">` instead, and the runner reads
+them back out of `TOBIRA_DUMP_DOM`.
+
+**A page that never reported is counted apart from a page whose tests
+failed**, with the first error said out loud. The two are different things:
+one is the engine falling over, the other is the engine's answer. A count
+with no reason is half a check.
+
+Also counted apart: pages that need `testdriver.js`, which drives a real
+browser's input from outside it and is not something to implement here.
+
+`foo.any.js` tests are served by WPT as generated pages, one per global, and
+none of them exist in the repository. The runner writes the **window**
+variant beside the script before each run (`*.any.html`, regenerated every
+time, not committed). The worker variants wait on `Worker`.
+
+First run, 2026-09-20, over everything vendored:
+**3186 / 8933 assertions, 677 pages; 184 pages never reported, 82 need
+testdriver.** By area:
+
+| area | assertions | note |
+|------|-----------:|------|
+| `html/webappapis/timers` | 14 / 16 | |
+| `css/cssom` | 1598 / 3457 | `sheet.cssRules` missing is 139 of the failures |
+| `dom/events` | 79 / 417 | 77 more pages need testdriver |
+| `workers` | 17 / 309 | `Worker is not defined` is 123 of them |
+
+# The reftests
 
 A reftest is two pages that must **draw identically**: the test, and a
 reference built from markup whose behaviour is not in question. That takes one

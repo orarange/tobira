@@ -1,0 +1,20 @@
+<html><body><pre id="out">start</pre>
+<script>
+var out = document.getElementById("out");
+function note(text) { out.textContent += " " + text; }
+note("typeof-Worker=" + typeof Worker);
+note("typeof-SharedWorker=" + typeof SharedWorker);
+note("typeof-structuredClone=" + typeof structuredClone);
+note("typeof-MessageChannel=" + typeof MessageChannel);
+try {
+  var w = new Worker("worker-child.js");
+  note("constructed=" + (w && typeof w.postMessage));
+  w.onmessage = function (e) { note("reply=" + JSON.stringify(e.data)); };
+  w.onerror = function (e) { note("onerror=" + (e && e.message)); };
+  w.postMessage({ n: 21 });
+  note("posted");
+  setTimeout(function () { note("after-200ms"); w.terminate(); note("terminated"); }, 200);
+} catch (e) {
+  note("threw=" + e.name + ":" + e.message);
+}
+</script></body></html>
