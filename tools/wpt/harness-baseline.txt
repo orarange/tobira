@@ -3167,7 +3167,38 @@ html/webappapis/timers/setinterval-settimeout-clamping.any.html::setTimeout(0) b
 html/webappapis/timers/settimeout-setinterval-handles.html::Timeouts and intervals share a set of unique active handles
 html/webappapis/timers/settimeout-setinterval-handles.html::setTimeout and setInterval should return numeric handles integer that is greater than zero
 html/webappapis/timers/timer-nesting-not-inherited-in-microtask.html::Test requires performance.now() to measure approximate timing of callbacks.
-workers/constructors/Worker/Worker-constructor.html::Test recursive Worker creation.
+workers/Worker-terminate-forever.html::Tests terminating a worker that is trying to run forever.
+workers/WorkerGlobalScope-close.html::Test errors are delivered after close.
+workers/WorkerGlobalScope-close.html::Test terminating a worker after close.
+workers/WorkerGlobalScope-close.html::Test type of close function.
+workers/WorkerGlobalScope-close.html::Test workers do not deliver pending events.
+workers/constructors/Worker/constructor-utf16-bom.html::Worker with UTF-16BE BOM
+workers/constructors/Worker/constructor-utf16-bom.html::Worker with UTF-16LE BOM
+workers/constructors/Worker/ctor-1.html::1 as argument
+workers/constructors/Worker/ctor-null.html::null as argument
+workers/constructors/Worker/terminate.html::terminate()
+workers/interfaces/DedicatedWorkerGlobalScope/postMessage/second-argument-null.html::Using null in postMessage's second argument
+workers/interfaces/DedicatedWorkerGlobalScope/postMessage/second-argument-undefined.html::Using undefined in postMessage's second argument
+workers/interfaces/DedicatedWorkerGlobalScope/postMessage/setting-postMessage.html::setting postMessage
+workers/interfaces/DedicatedWorkerGlobalScope/postMessage/structured-clone-message.html::1
+workers/interfaces/DedicatedWorkerGlobalScope/postMessage/structured-clone-message.html::Infinity
+workers/interfaces/DedicatedWorkerGlobalScope/postMessage/structured-clone-message.html::NaN
+workers/interfaces/DedicatedWorkerGlobalScope/postMessage/structured-clone-message.html::error
+workers/interfaces/DedicatedWorkerGlobalScope/postMessage/structured-clone-message.html::false
+workers/interfaces/DedicatedWorkerGlobalScope/postMessage/structured-clone-message.html::null
+workers/interfaces/DedicatedWorkerGlobalScope/postMessage/structured-clone-message.html::self
+workers/interfaces/DedicatedWorkerGlobalScope/postMessage/structured-clone-message.html::string
+workers/interfaces/DedicatedWorkerGlobalScope/postMessage/structured-clone-message.html::structured clone of message
+workers/interfaces/DedicatedWorkerGlobalScope/postMessage/structured-clone-message.html::true
+workers/interfaces/WorkerGlobalScope/close/sending-messages.html::close() and sending messages
+workers/interfaces/WorkerUtils/WindowTimers/002.html::clearTimeout
+workers/interfaces/WorkerUtils/WindowTimers/004.html::clearInterval
+workers/interfaces/WorkerUtils/navigator/002.html::navigator.appName
+workers/interfaces/WorkerUtils/navigator/003.html::navigator.appVersion
+workers/interfaces/WorkerUtils/navigator/004.html::navigator.platform
+workers/interfaces/WorkerUtils/navigator/005.html::navigator.userAgent
+workers/interfaces/WorkerUtils/navigator/006.html::navigator.onLine
+workers/interfaces/WorkerUtils/navigator/language.html::navigator.language
 workers/same-origin-check.sub.html::SharedWorker: cross-origin (classic)
 workers/same-origin-check.sub.html::SharedWorker: cross-origin (module)
 workers/same-origin-check.sub.html::SharedWorker: cross-origin-to-same-origin-redirect (classic)
@@ -3184,3 +3215,6 @@ workers/same-origin-check.sub.html::Worker: same-origin-to-cross-origin-redirect
 workers/same-origin-check.sub.html::Worker: same-origin-to-cross-origin-redirect (module)
 workers/same-origin-check.sub.html::Worker: same-origin-to-cross-origin-to-same-origin-redirect (classic)
 workers/same-origin-check.sub.html::Worker: same-origin-to-cross-origin-to-same-origin-redirect (module)
+workers/semantics/encodings/001.html::encoding, dedicated worker
+workers/semantics/multiple-workers/002.html::creating 3 sibling dedicated workers
+workers/semantics/multiple-workers/exposure.any.html::Worker exposure

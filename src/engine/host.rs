@@ -108,6 +108,19 @@ pub enum HostData {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+pub enum WorkerEvent {
+    /// The worker called `postMessage`.
+    Message(HostData),
+    /// The worker threw, or its script would not load. The document sees an
+    /// `error` event; a failure that is never reported is a page that waits
+    /// for a reply forever.
+    Error(String),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct WorkerId(pub u32);
+
+#[derive(Debug, Clone, PartialEq)]
 pub enum NavigationAction {
     Navigate {
         window: WindowId,
@@ -753,6 +766,44 @@ pub trait Host: Any {
 
     fn fetch(&mut self, request: FetchRequest) -> HostResult<NetworkRequestId>;
     fn abort_fetch(&mut self, request_id: NetworkRequestId) -> HostResult<bool>;
+
+    // ---- Workers -------------------------------------------------------
+    //
+    // A worker is another script, running somewhere the engine cannot see,
+    // that exchanges **copies** of values with this one. Nothing but
+    // [`HostData`] crosses, which is what `structuredClone` means and also
+    // what makes a real thread safe: a `Value` lives in one `Vm`'s heap and
+    // could not be sent even if someone tried.
+    //
+    // The host owns whatever the worker really is -- a thread, here.
+
+    /// Start a worker from a script URL, resolved against the document.
+    fn spawn_worker(&mut self, _url: &str) -> HostResult<WorkerId> {
+        Err(HostError::Unsupported)
+    }
+
+    /// `worker.postMessage(data)`, from the document to the worker.
+    fn post_to_worker(&mut self, _worker: WorkerId, _data: HostData) -> HostResult<()> {
+        Err(HostError::Unsupported)
+    }
+
+    /// `worker.terminate()`: the worker stops, whatever it was doing.
+    fn terminate_worker(&mut self, _worker: WorkerId) -> HostResult<()> {
+        Err(HostError::Unsupported)
+    }
+
+    /// Everything the workers have said since this was last called. Drained
+    /// by the event loop, so a message becomes a `message` event on the next
+    /// turn rather than interrupting whatever is running.
+    fn take_worker_events(&mut self) -> Vec<(WorkerId, WorkerEvent)> {
+        Vec::new()
+    }
+
+    /// `self.postMessage(data)`, from inside a worker back to whoever started
+    /// it. Only a worker's own host implements this.
+    fn post_from_worker(&mut self, _data: HostData) -> HostResult<()> {
+        Err(HostError::Unsupported)
+    }
 
     /// Perform an HTTP request synchronously and return the response.
     ///

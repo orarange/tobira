@@ -1209,6 +1209,25 @@ react.dev だけ撮らんかった一枚が退化しとった。
   持つ頁なら要素名まで出る。実頁には `out` が無いので、**HN の該当部分だけ
   切り出した検体を作る**のが早い。行間か padding か表の行の高さかが、
   推測やのうて名指しで出る。作ってあるのに、まだこの問いに使うてない。
+- **Worker（dedicated）を入れた**（2026-09-20）。`src/worker.rs`。
+  **本物の OS スレッド**で、各 worker が自分の `Vm` を持つ。`js.rs` の engine
+  スレッドと同じ形（`Vm: !Send` なのでスレッドの中で作る）。
+  - **跨ぐのは `HostData` だけ**。`Value` は一つの `Vm` のヒープを指すので
+    送れん — **型がその事故を拒む**（テストで気付くのやのうて、起こせん）。
+    それがそのまま structured clone の意味でもある。
+  - 面: `new Worker(url)` / `postMessage` / `onmessage` /
+    `addEventListener("message")` / `terminate`、worker 側は `self` /
+    `postMessage` / `onmessage` / `close`。**DOM は無し**（仕様どおり）。
+    `SharedWorker`・module worker・`importScripts` は無し。
+  - message は `pump_event_loop` の頭で `take_worker_events()` から配る。
+    **event は本物の Event**（`preventDefault` 等がある。無いと頁が落ちる
+    — WPT で 56 本それで落ちとった）。
+  - `terminate()` はスレッドの終了を **join して待つ**。待たんと
+    `--screenshot` が返って来んくなる。上限 32 本。
+  - 数字: WPT `workers` **17 → 51 assertions**、検体
+    `tools/scripterr/worker.html` が **Chrome と一致**（`SharedWorker` 以外）。
+  - 残り: `Worker could not start: Network` 21 本（data:/blob: の URL）、
+    `SharedWorker` 57 本、報告せず死ぬ頁 68 本。
 - **CI が 12 本続けて赤かった**（2026-09-20、a4261a2 〜 ed1db4d、f5df304 で修正）。
   手元の `cargo test --release` は 1202/0 で通るのに、CI（**debug build**）で
   `JSON.stringify` の深さ試験が**スタックを溢れさせとった**。**debug は frame が

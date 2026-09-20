@@ -279,6 +279,9 @@ struct HistoryEntry {
 }
 
 pub struct BrowserHost {
+    /// The workers this document has started. Owning them here means they
+    /// are stopped when the document goes away, rather than outliving it.
+    workers: crate::worker::WorkerPool,
     nodes: Vec<DomNode>,
     document: usize,
     /// The focused node (`document.activeElement`), set by focus/blur events.
@@ -354,6 +357,7 @@ impl BrowserHost {
     pub fn from_html(html: &str, url: &str) -> Self {
         let root = parse_document(html);
         let mut host = Self {
+            workers: crate::worker::WorkerPool::default(),
             nodes: Vec::new(),
             document: 0,
             active_element: None,
@@ -2990,6 +2994,42 @@ impl Host for BrowserHost {
     }
     fn abort_fetch(&mut self, _id: NetworkRequestId) -> HostResult<bool> {
         Ok(false)
+    }
+
+    /// `new Worker(url)`: fetch the script here, where the network is, and
+    /// hand the source to a thread that will own its own `Vm`.
+    fn spawn_worker(&mut self, url: &str) -> HostResult<tobira_engine::engine::WorkerId> {
+        let resolved = Url::parse(&self.location.href)
+            .and_then(|base| base.resolve(url))
+            .or_else(|_| Url::parse(url))
+            .map_err(|_| HostError::Network)?;
+        let response = crate::http::fetch(&resolved).map_err(|_| HostError::Network)?;
+        if !(200..300).contains(&response.status_code) {
+            return Err(HostError::Network);
+        }
+        let source = String::from_utf8_lossy(&response.body).to_string();
+        self.workers.spawn(source, resolved.to_string())
+    }
+
+    fn post_to_worker(
+        &mut self,
+        worker: tobira_engine::engine::WorkerId,
+        data: HostData,
+    ) -> HostResult<()> {
+        self.workers.post(worker, data)
+    }
+
+    fn terminate_worker(
+        &mut self,
+        worker: tobira_engine::engine::WorkerId,
+    ) -> HostResult<()> {
+        self.workers.terminate(worker)
+    }
+
+    fn take_worker_events(
+        &mut self,
+    ) -> Vec<(tobira_engine::engine::WorkerId, tobira_engine::engine::WorkerEvent)> {
+        self.workers.take_events()
     }
     /// `localStorage` / `sessionStorage` / `document.cookie`, all backed by the
     /// process-wide store in `site_state` and keyed by the document's origin.

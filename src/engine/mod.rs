@@ -45,7 +45,8 @@ pub use host::{
     LocationSnapshot, NavigationAction, NavigationOutcome, NetworkRequestId, NodeId, NodeKind,
     NoopHost, ObserverId, ObserverKind, ObserverOp, ObserverOptions, ObserverRecord,
     ObserverResult, ScrollMetrics, SiblingDirection, StorageAreaKind, StorageAreaScope, StorageOp,
-    StorageResult, TimerId, TimerKind, TimerRequest, WindowId, WindowMetrics,
+    StorageResult, TimerId, TimerKind, TimerRequest, WindowId, WindowMetrics, WorkerEvent,
+    WorkerId,
 };
 pub use js_regex::{JsCaptures, JsMatch, JsRegex};
 pub use parser::{ParseError, Parser, ParserOptions};

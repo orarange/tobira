@@ -14,6 +14,7 @@ mod site_state;
 mod svg;
 mod text;
 mod url;
+mod worker;
 
 use browser::load_page_for_cli;
 use error::Result;

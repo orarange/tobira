@@ -18,6 +18,7 @@ use super::host::{
     AdjacentPosition, ConsoleLevel, ConsoleMessage, DomMutation, DomMutationResult, DomRead,
     DomReadResult, FetchBody, FetchMode, FetchRequest, FetchResponse, HistoryAction, Host,
     HostData, HttpMethod, NavigationAction, NodeId, NodeKind, NoopHost, ObserverId, ObserverKind,
+    WorkerEvent, WorkerId,
     ObserverOp, ObserverOptions, ObserverRecord, ObserverResult, SiblingDirection, StorageAreaKind,
     StorageAreaScope, StorageOp, StorageResult, WindowId,
 };
@@ -545,6 +546,14 @@ enum BuiltinId {
     ReflectApply,
     ReflectConstruct,
     StructuredClone,
+    WorkerConstructor,
+    WorkerPostMessage,
+    WorkerTerminate,
+    WorkerAddEventListener,
+    WorkerRemoveEventListener,
+    /// Inside a worker: `postMessage` and `close` on its own global.
+    WorkerSelfPostMessage,
+    WorkerSelfClose,
     ProxyConstructor,
     UrlSearchParamsConstructor,
     HeadersConstructor,
@@ -1573,6 +1582,16 @@ pub struct Vm {
     /// Event listeners stored by (node_handle, event_type) → list of JS function GcRefs.
     /// Lives in the VM (not the Host) so GcRefs remain valid.
     event_listeners: HashMap<u32, HashMap<String, Vec<GcRef<JsObject>>>>,
+    /// The `Worker` object a worker's messages belong to, by the id the host
+    /// gave it. A worker is not a DOM node, so it cannot use the node-handle
+    /// listener tables; its handlers live on the object itself.
+    worker_objects: HashMap<u32, GcRef<JsObject>>,
+    worker_prototype: Option<GcRef<JsObject>>,
+    /// In a worker's own `Vm`: the object `self` is bound to.
+    worker_global: Option<GcRef<JsObject>>,
+    /// Set in a worker's own `Vm`: `close()` was called and the script should
+    /// stop being given anything more to do.
+    worker_closed: bool,
     /// Listeners added with `capture: true`. They hear the event on the
     /// way down (and at the target, first); the ones above hear it at the
     /// target and on the way up. Same key shape as `event_listeners`.
@@ -2276,6 +2295,10 @@ impl Vm {
             random_state,
             host,
             event_listeners: HashMap::new(),
+            worker_objects: HashMap::new(),
+            worker_prototype: None,
+            worker_global: None,
+            worker_closed: false,
             capture_listeners: HashMap::new(),
             mutation_observers: HashMap::new(),
             resize_observers: HashMap::new(),
@@ -3045,6 +3068,10 @@ impl Vm {
             // vanish between two reads of the same element. The DOM side owns
             // their lifetime, not JS reachability.
             event_listeners,
+            worker_objects,
+            worker_prototype,
+            worker_global,
+            worker_closed: _,
             capture_listeners,
             mutation_observers,
             resize_observers,
@@ -3145,6 +3172,11 @@ impl Vm {
         event_loop.trace(tracer);
 
         event_listeners.trace(tracer);
+        for object in worker_objects.values() {
+            object.trace(tracer);
+        }
+        worker_prototype.trace(tracer);
+        worker_global.trace(tracer);
         capture_listeners.trace(tracer);
         mutation_observers.trace(tracer);
         resize_observers.trace(tracer);
@@ -3571,7 +3603,9 @@ impl Vm {
     /// timers first (bounded), then run a single rAF pass; callbacks scheduled
     /// during that pass are deferred to the next frame, matching the HTML spec.
     pub fn pump_event_loop(&mut self, now_ms: u64, max_steps: usize) -> bool {
-        let mut did_work = false;
+        // Anything the workers said since the last turn becomes an event now,
+        // before the timers, so a reply is not held back a whole frame.
+        let mut did_work = self.deliver_worker_events();
 
         // Phase 1: run all timers/macrotasks due by `now_ms` and their
         // microtasks, without touching rAF. Bounded by `max_steps` to guard
@@ -5760,6 +5794,8 @@ impl Vm {
             self.globals.insert(name.to_string(), value);
         }
 
+        let worker_ctor = self.allocate_builtin_value(BuiltinId::WorkerConstructor, true, None);
+        self.globals.insert("Worker".to_string(), worker_ctor);
         let structured_clone = self.allocate_builtin_method(BuiltinId::StructuredClone);
         self.globals
             .insert("structuredClone".to_string(), structured_clone);
@@ -6524,6 +6560,197 @@ impl Vm {
         self.define_data_property(prototype, PropertyKey::from("name"), name_value, true, false, true);
         let empty = self.make_string_value("");
         self.define_data_property(prototype, PropertyKey::from("message"), empty, true, false, true);
+    }
+
+    /// `Worker.prototype`, made on demand: a page that never starts one
+    /// should not pay for it.
+    fn worker_prototype_ref(&mut self) -> GcRef<JsObject> {
+        if let Some(prototype) = self.worker_prototype {
+            return prototype;
+        }
+        let prototype = self.allocate_ordinary_object(Some(self.object_prototype_ref()));
+        self.define_builtin_method(prototype, "postMessage", BuiltinId::WorkerPostMessage);
+        self.define_builtin_method(prototype, "terminate", BuiltinId::WorkerTerminate);
+        self.define_builtin_method(
+            prototype,
+            "addEventListener",
+            BuiltinId::WorkerAddEventListener,
+        );
+        self.define_builtin_method(
+            prototype,
+            "removeEventListener",
+            BuiltinId::WorkerRemoveEventListener,
+        );
+        self.worker_prototype = Some(prototype);
+        prototype
+    }
+
+    /// The id behind a `Worker` object, or a TypeError for anything else --
+    /// which is what `Worker.prototype.postMessage.call({})` should get.
+    fn worker_id_of(&mut self, value: &Value) -> Result<u32, VmError> {
+        let Value::Object(object) = value else {
+            return Err(VmError::TypeError(
+                "not a Worker".to_string(),
+            ));
+        };
+        match self.get_own_property_descriptor(
+            *object,
+            &PropertyKey::from("__tobira_worker_id"),
+        ) {
+            Some(JsPropertyDescriptor::Data {
+                value: Value::Number(id),
+                ..
+            }) => Ok(id as u32),
+            _ => Err(VmError::TypeError("not a Worker".to_string())),
+        }
+    }
+
+    /// Hand every message the workers have sent to the object that started
+    /// them, as a `message` event. Called from the event loop, so a message
+    /// arrives between turns rather than in the middle of one.
+    fn deliver_worker_events(&mut self) -> bool {
+        let events = self.host.take_worker_events();
+        if events.is_empty() {
+            return false;
+        }
+        for (worker, event) in events {
+            let Some(object) = self.worker_objects.get(&worker.0).copied() else {
+                continue;
+            };
+            let (event_type, payload) = match event {
+                WorkerEvent::Message(data) => ("message", self.host_data_to_value(data)),
+                WorkerEvent::Error(message) => {
+                    ("error", self.make_string_value(&message))
+                }
+            };
+            let key = if event_type == "message" { "data" } else { "message" };
+            let event_object =
+                self.build_message_event(event_type, key, payload, Value::Object(object));
+            let argument = Value::Object(event_object);
+
+            // `onmessage` first, then anything `addEventListener` added.
+            let mut handlers = Vec::new();
+            let on_key = PropertyKey::from(format!("on{event_type}").as_str());
+            if let Ok(handler) = self.get_property_value(&Value::Object(object), &on_key)
+                && self.is_callable_value(&handler)
+            {
+                handlers.push(handler);
+            }
+            let list_key = PropertyKey::from(format!("__tobira_on_{event_type}").as_str());
+            if let Some(JsPropertyDescriptor::Data {
+                value: Value::Object(array),
+                ..
+            }) = self.get_own_property_descriptor(object, &list_key)
+            {
+                handlers.extend(
+                    self.array_like_to_vec(&Value::Object(array))
+                        .unwrap_or_default(),
+                );
+            }
+            for handler in handlers {
+                if let Err(error) =
+                    self.call_value_sync(handler, Value::Object(object), vec![argument.clone()])
+                {
+                    let message = format!("{error}");
+                    self.push_job_error(message);
+                }
+            }
+        }
+        true
+    }
+
+    /// A `message` (or `error`) event object, with the parts every event
+    /// has. A page calls `event.preventDefault()` on things it has no
+    /// intention of cancelling, out of habit, and a bare `{data}` object
+    /// throws when it does.
+    fn build_message_event(&mut self, event_type: &str, payload_key: &str, payload: Value, target: Value) -> GcRef<JsObject> {
+        let init = DomEventInit {
+            bubbles: false,
+            cancelable: false,
+            ..DomEventInit::default()
+        };
+        let event = self.build_host_event(event_type, &target, &init);
+        self.define_data_property(
+            event,
+            PropertyKey::from(payload_key),
+            payload,
+            true,
+            true,
+            true,
+        );
+        // A message has no source port or origin yet; the properties exist so
+        // that reading them is undefined rather than a throw on a `null`.
+        for name in ["origin", "lastEventId"] {
+            let empty = self.make_string_value("");
+            self.define_data_property(event, PropertyKey::from(name), empty, true, true, true);
+        }
+        for name in ["source", "ports"] {
+            self.define_data_property(
+                event,
+                PropertyKey::from(name),
+                Value::Null,
+                true,
+                true,
+                true,
+            );
+        }
+        event
+    }
+
+    /// A worker's own global: `self`, `postMessage`, `close`. No document,
+    /// no window -- that is the spec, not a shortcut.
+    pub fn install_worker_globals(&mut self) {
+        // `self` is an object the script can hang `onmessage` on, and the
+        // same object every time it is read.
+        let global_ref = self.allocate_ordinary_object(Some(self.object_prototype_ref()));
+        self.define_builtin_method(global_ref, "postMessage", BuiltinId::WorkerSelfPostMessage);
+        self.define_builtin_method(global_ref, "close", BuiltinId::WorkerSelfClose);
+        self.globals
+            .insert("self".to_string(), Value::Object(global_ref));
+        self.worker_global = Some(global_ref);
+        let post = self.allocate_builtin_method(BuiltinId::WorkerSelfPostMessage);
+        self.globals.insert("postMessage".to_string(), post);
+        let close = self.allocate_builtin_method(BuiltinId::WorkerSelfClose);
+        self.globals.insert("close".to_string(), close);
+    }
+
+    /// Whether the worker script has called `close()`.
+    pub fn worker_is_closed(&self) -> bool {
+        self.worker_closed
+    }
+
+    /// Give a worker's script a message from the document.
+    pub fn dispatch_worker_message(&mut self, data: HostData) -> Result<(), VmError> {
+        let payload = self.host_data_to_value(data);
+        let target = self
+            .worker_global
+            .map(Value::Object)
+            .unwrap_or(Value::Undefined);
+        let event = self.build_message_event("message", "data", payload, target);
+        // `onmessage = fn` reaches either the global scope or `self`,
+        // depending on how the script wrote it; both are the same handler.
+        let mut handler = self
+            .globals
+            .get("onmessage")
+            .cloned()
+            .unwrap_or(Value::Undefined);
+        if !self.is_callable_value(&handler)
+            && let Some(global_ref) = self.worker_global
+        {
+            handler = self.get_property_value(
+                &Value::Object(global_ref),
+                &PropertyKey::from("onmessage"),
+            )?;
+        }
+        if self.is_callable_value(&handler) {
+            let this = self
+                .worker_global
+                .map(Value::Object)
+                .unwrap_or(Value::Undefined);
+            self.call_value_sync(handler, this, vec![Value::Object(event)])?;
+        }
+        self.drain_microtasks();
+        Ok(())
     }
 
     fn error_prototype_for(&self, name: &str) -> GcRef<JsObject> {
@@ -8426,6 +8653,7 @@ impl Vm {
         matches!(
             builtin,
             BuiltinId::ObjectConstructor
+                | BuiltinId::WorkerConstructor
                 | BuiltinId::ArrayConstructor
                 | BuiltinId::FunctionConstructor
                 | BuiltinId::PromiseConstructor
@@ -14305,6 +14533,99 @@ impl Vm {
             BuiltinId::StructuredClone => {
                 let value = args.first().cloned().unwrap_or(Value::Undefined);
                 self.structured_clone(&value, 0)
+            }
+            BuiltinId::WorkerConstructor => {
+                let url = match args.first() {
+                    None | Some(Value::Undefined) => {
+                        return Err(VmError::TypeError(
+                            "Worker requires a script URL".to_string(),
+                        ));
+                    }
+                    Some(value) => self.to_string_coerced(value)?,
+                };
+                let id = self.host.spawn_worker(&url).map_err(|error| {
+                    VmError::TypeError(format!("Worker could not start: {error:?}"))
+                })?;
+                let prototype = self.worker_prototype_ref();
+                let object = self.heap.allocate_object(JsObject {
+                    prototype: Some(prototype),
+                    ..JsObject::default()
+                });
+                self.define_data_property(
+                    object,
+                    PropertyKey::from("__tobira_worker_id"),
+                    Value::Number(f64::from(id.0)),
+                    false,
+                    false,
+                    false,
+                );
+                self.worker_objects.insert(id.0, object);
+                Ok(Value::Object(object))
+            }
+            BuiltinId::WorkerPostMessage => {
+                let id = self.worker_id_of(&this_value)?;
+                let value = args.first().cloned().unwrap_or(Value::Undefined);
+                // Only a copy crosses, which is what `structuredClone` means
+                // and what makes the other side's thread safe.
+                let data = self.value_to_host_data(&value);
+                self.host
+                    .post_to_worker(WorkerId(id), data)
+                    .map_err(|error| {
+                        VmError::TypeError(format!("postMessage failed: {error:?}"))
+                    })?;
+                Ok(Value::Undefined)
+            }
+            BuiltinId::WorkerTerminate => {
+                let id = self.worker_id_of(&this_value)?;
+                let _ = self.host.terminate_worker(WorkerId(id));
+                self.worker_objects.remove(&id);
+                Ok(Value::Undefined)
+            }
+            BuiltinId::WorkerAddEventListener | BuiltinId::WorkerRemoveEventListener => {
+                let event_type = args.first().map(|v| self.to_string(v)).unwrap_or_default();
+                let listener = args.get(1).cloned().unwrap_or(Value::Undefined);
+                let Value::Object(this_ref) = this_value else {
+                    return Ok(Value::Undefined);
+                };
+                let key = PropertyKey::from(format!("__tobira_on_{event_type}").as_str());
+                let mut listeners = match self.get_own_property_descriptor(this_ref, &key) {
+                    Some(JsPropertyDescriptor::Data {
+                        value: Value::Object(array),
+                        ..
+                    }) => self
+                        .array_like_to_vec(&Value::Object(array))
+                        .unwrap_or_default(),
+                    _ => Vec::new(),
+                };
+                let adding = builtin == BuiltinId::WorkerAddEventListener;
+                let same = |left: &Value, right: &Value| match (left, right) {
+                    (Value::Object(a), Value::Object(b)) => a.raw() == b.raw(),
+                    _ => false,
+                };
+                if adding {
+                    if self.is_callable_value(&listener)
+                        && !listeners.iter().any(|existing| same(existing, &listener))
+                    {
+                        listeners.push(listener);
+                    }
+                } else {
+                    listeners.retain(|existing| !same(existing, &listener));
+                }
+                let array = self.make_array_from_values(listeners)?;
+                self.define_data_property(this_ref, key, array, true, false, true);
+                Ok(Value::Undefined)
+            }
+            BuiltinId::WorkerSelfPostMessage => {
+                let value = args.first().cloned().unwrap_or(Value::Undefined);
+                let data = self.value_to_host_data(&value);
+                self.host.post_from_worker(data).map_err(|error| {
+                    VmError::TypeError(format!("postMessage failed: {error:?}"))
+                })?;
+                Ok(Value::Undefined)
+            }
+            BuiltinId::WorkerSelfClose => {
+                self.worker_closed = true;
+                Ok(Value::Undefined)
             }
             BuiltinId::UrlSearchParamsConstructor => {
                 let pairs = match args.first() {
