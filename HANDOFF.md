@@ -395,6 +395,29 @@ receiver の own property 数 1 / 20 / 100 / 400 で回すと、O(幅) の処理
       ③ せんかったら `build_styled_tree` の残り（`ComputedStyle` の intern /
       117 フィールドのハッシュ / カスケード / `Arc` 複製）か
       `parse_document`。**そこで初めて三つに割る**。
+      - **【当たり】固定費の正体は日本語フォントの読み込み**（2026-09-20、
+        Mac の九人目の容疑者）。三枚を `--cli` に食わせるだけで出た:
+        ```
+        空の頁                      4.7 MiB   0.03 CPU s
+        ASCII の文字だけ           31.6 MiB   0.14 CPU s
+        ＋日本語を五文字混ぜる    274.7 MiB   1.12 CPU s   ← ここ
+        ```
+        **日本語五文字で 243 MiB と 1.0 CPU 秒。** 検体
+        `tools/scripterr/fontcost.html`。
+        - 疑わしいのは `font.rs:908` `load_font_file` の `.ttc` の経路:
+          `bytes.clone()` してから `Font::from_bytes` を
+          **collection_index 0..4 で最大 4 回**試す。日本語フォントは
+          `.ttc` が多い（`msgothic.ttc` / `YuGothM.ttc`）。そこへ
+          **`fontdue` はファイルの約 40 倍に展開する**（自分で font.rs に
+          書いてあるコメント）。20MB の `.ttc` なら 80MB の memcpy +
+          4 回のパース試行 + 40 倍の展開。
+        - **ja.wikipedia が六枚で唯一 Chrome より重い（599 対 566 MiB）**
+          のは、たぶんこれ。**最大の目標に対する唯一の負けが、日本語**。
+        - **次はここから**: ① 成功した collection_index を覚えて
+          4 回試すのをやめる ② `bytes.clone()` を減らす
+          ③ 展開したフォントの上限と追い出し。
+          **時間とメモリの両方で効く**（0d942a2 までの八人は全員無罪、
+          九人目で当たった）。
       - **属性の量も無罪**（同日、react.dev の保存 HTML で実測）。
         HTML 266KB の **87% が属性**（4176 個、class は平均 68 文字・最長
         515 文字の Tailwind）なので容疑者に挙がったが、剥いでも変わらん:
