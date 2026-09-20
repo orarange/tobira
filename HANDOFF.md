@@ -390,8 +390,24 @@ receiver の own property 数 1 / 20 / 100 / 400 で回すと、O(幅) の処理
       HTML の parse は 15ms 側に入っとるので安い。**668ms が照合**。
       検体 `tools/scripterr/restyle.html`。
       → **`parse_document` は無罪、`build_styled_tree` が的**。
-      規則数に比例しとるので、**タグ / class / id の索引が無くて
-      要素数 × 規則数の総当たりになっとる**（Mac の読み ②）。
+      - **「索引が無い」は誤り**（同日中に訂正）。`css.rs:118` に
+        `RuleIndex`（by_id / by_class / by_tag / universal）が**既にあって、
+        効いとる**。`compute_style` が `candidates_for` で引いとる。
+        **今日の「実装はあるが効いてない」の三例目**やと思うたが、今回は
+        違うて**検体の方が悪かった**:
+        ```
+        restyle.html        規則 1200 本が全部 .a か .b で終わる → 680 ms
+        restyle_spread.html 規則 1200 本が全部違う class で終わる →  24 ms
+        CSS なし                                                    15 ms
+        ```
+        **鍵が散っとれば 1200 規則で +9ms。集中しとると +665ms。**
+        索引は「一番右の compound」で引くので、**同じ鍵に何百本も
+        ぶら下がると効かん**。最初の検体はその最悪形を測っとった。
+      - **残る問い**: react.dev の実 CSS がどのバケツに何本ぶら下がっとるか。
+        1402ms を説明するには、**どこかのバケツに数百本が集中しとる**はず
+        （`by_tag` か `universal`、例えば `.prose p` のような
+        「右端がタグ」の規則群）。**次はそれを数える**こと — 一回の apply で
+        `candidates_for` が返す候補数の分布。
       **初回読み込みにも効く**（切片 5.6 秒にも同じ経路が入る）。
     - 測り方の教訓: **保存した頁では測れん**。react.dev の保存 HTML は
       script が動かんので DOM が変わらず、apply が 0 回になる。
