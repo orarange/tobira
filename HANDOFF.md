@@ -554,6 +554,11 @@ receiver の own property 数 1 / 20 / 100 / 400 で回すと、O(幅) の処理
   untracked 検査のおかげで紛れ込みは無かったが、**それは運が良かっただけ**。
   新しい生成物を作る日ほど危ない — この日は `*.any.html` と `tools/*/out/`
   を作っとった。）
+  **規律やのうて手順で止める**: `ship.sh` が **初めて追加されるファイルを
+  一覧で見せて exit 4** する（`git diff --cached --diff-filter=A`）。
+  `git add -A` は staged にしてまうので untracked 検査を素通りする、その穴。
+  目を通して問題なければ `SHIP_ALLOW_NEW=1`。CI の門・`ship.sh` の一本化・
+  untracked 検査に続く四つ目。
 - **当てずっぽうで直さん。計器を作って測ってから直す。**
   手書きの検体は「思いついたもの」しか見えん。09-19〜20 に外した読みが
   七つ（web font が画素差の底・行の積算が HN の 10%・`namespaceURI`・
