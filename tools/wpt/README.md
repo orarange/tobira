@@ -35,6 +35,13 @@ none of them exist in the repository. The runner writes the **window**
 variant beside the script before each run (`*.any.html`, regenerated every
 time, not committed). The worker variants wait on `Worker`.
 
+**A page that waits longer than the settle never reports.** The runner gives
+each page `WPT_SETTLE_MS` (1500 by default) and then reads what it wrote, so a
+test that waits four seconds for a timer is counted as never reporting rather
+than as failing. Raising it changes the numbers a little and the wall-clock a
+lot: `workers` scores 51 at 1500ms and 54 at 5000ms. Quote the setting with
+the number.
+
 First run, 2026-09-20, over everything vendored:
 **3186 / 8933 assertions, 677 pages; 184 pages never reported, 82 need
 testdriver.** By area:

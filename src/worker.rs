@@ -17,7 +17,7 @@ use std::thread::JoinHandle;
 
 use tobira_engine::engine::{
     ConsoleMessage, DomEventRequest, DomEventResult, DomMutation, DomMutationResult, DomRead,
-    DomReadResult, FetchRequest, FetchResponse, FrameId, Heap, HistoryAction, HistoryOutcome,
+    DomReadResult, FetchRequest, FrameId, Heap, HistoryAction, HistoryOutcome,
     Host, HostData, HostError, HostEvent, HostResult, HostTimeSnapshot, LocationSnapshot,
     NavigationAction, NavigationOutcome, NetworkRequestId, NoopHost, ObserverOp, ObserverResult,
     StorageOp, StorageResult, TimerId, TimerRequest, Vm, WindowId, WindowMetrics, WorkerEvent,
@@ -27,7 +27,9 @@ use tobira_engine::engine::{
 /// What the document's side of a worker holds.
 struct WorkerThread {
     to_worker: Sender<ToWorker>,
-    handle: Option<JoinHandle<()>>,
+    /// Kept so the thread is named and owned while it lives; never joined
+    /// (see [`WorkerPool::terminate`]).
+    _handle: JoinHandle<()>,
 }
 
 enum ToWorker {
@@ -72,7 +74,7 @@ impl WorkerPool {
             id,
             WorkerThread {
                 to_worker,
-                handle: Some(handle),
+                _handle: handle,
             },
         ));
         Ok(id)
@@ -88,20 +90,23 @@ impl WorkerPool {
             .map_err(|_| HostError::Unsupported)
     }
 
-    /// `terminate()`: ask the worker to stop, and wait for it.
+    /// `terminate()`: the worker stops being anyone's concern.
     ///
-    /// Waiting matters. A thread still running when the process wants to
-    /// finish keeps a screenshot or a `--cli` run from ever returning, and
-    /// the worker only checks between turns anyway, so the wait is short.
+    /// It is **not** joined. A worker only reads its inbox between turns, so
+    /// one stuck in `while (true) {}` -- which is exactly what
+    /// `Worker-terminate-forever` asks for -- would never reach the message,
+    /// and joining would hang the document instead of the worker. The thread
+    /// is dropped instead: its script runs out of the engine's own loop fuel
+    /// and it ends on its own, and nothing waits for a detached thread at
+    /// exit. Anything it posts in the meantime is dropped, because the
+    /// `Worker` object it belonged to is gone from the engine's table.
     pub fn terminate(&mut self, worker: WorkerId) -> HostResult<()> {
         let Some(index) = self.workers.iter().position(|(id, _)| *id == worker) else {
             return Ok(());
         };
-        let (_, mut thread) = self.workers.remove(index);
+        let (_, thread) = self.workers.remove(index);
         let _ = thread.to_worker.send(ToWorker::Terminate);
-        if let Some(handle) = thread.handle.take() {
-            let _ = handle.join();
-        }
+        drop(thread);
         Ok(())
     }
 

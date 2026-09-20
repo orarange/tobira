@@ -1222,8 +1222,12 @@ react.dev だけ撮らんかった一枚が退化しとった。
   - message は `pump_event_loop` の頭で `take_worker_events()` から配る。
     **event は本物の Event**（`preventDefault` 等がある。無いと頁が落ちる
     — WPT で 56 本それで落ちとった）。
-  - `terminate()` はスレッドの終了を **join して待つ**。待たんと
-    `--screenshot` が返って来んくなる。上限 32 本。
+  - `terminate()` は **join せん**（一度 join にして戻した）。worker は
+    turn の合間しか受信箱を見んので、`while(true){}` の中におる worker は
+    メッセージに辿り着かず、**join したら止まるのは worker やのうて文書の方**
+    になる。WPT の `Worker-terminate-forever` がまさにそれを要求しとる。
+    スレッドは手放す: script はエンジンの loop fuel を使い切って自分で終わり、
+    detach したスレッドを終了時に待つ者はおらん。上限 32 本。
   - 数字: WPT `workers` **17 → 51 assertions**、検体
     `tools/scripterr/worker.html` が **Chrome と一致**（`SharedWorker` 以外）。
   - 残り: `Worker could not start: Network` 21 本（data:/blob: の URL）、
