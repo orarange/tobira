@@ -1,3 +1,4 @@
 tests/fixtures/html5lib/*.dat -text
 tests/fixtures/test262/harness/** -text
 tests/fixtures/test262/test/** -text
+tests/fixtures/wpt/** -text
