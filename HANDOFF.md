@@ -476,6 +476,37 @@ receiver の own property 数 1 / 20 / 100 / 400 で回すと、O(幅) の処理
           ③ 展開したフォントの上限と追い出し。
           **時間とメモリの両方で効く**（0d942a2 までの八人は全員無罪、
           九人目で当たった）。
+        - **【解決】①②③のどれでもなく、`fontdue` を外した**（2026-09-26）。
+          「40 倍の展開」の正体は `fontdue::Font::from_bytes` が**開いた瞬間に
+          全グリフの輪郭を幾何に起こす**こと。字数に関係なく、フォントの
+          グリフ数で決まる（段の形になるのはこのせい）。単体で測った:
+          ```
+                           ファイル  グリフ数   fontdue            ttf-parser
+          ipag.ttf           6 MB    12,728   +58 MiB  0.11 s    +0 MiB  20 µs
+          wqy-zenhei.ttc    16 MB    44,960  +209 MiB  0.72 s    +0 MiB  17 µs
+          DejaVuSans.ttf   0.7 MB     6,253   +19 MiB  0.03 s    +0 MiB  17 µs
+          ```
+          上限・追い出し（③）は「居座る 200 MiB を捨てる」話で、日本語の頁では
+          毎回読み直しになるだけ。**展開せんのが本筋**。
+          → `ab_glyph`（`owned_ttf_parser` の上、輪郭は描くときに読む）に
+          替えた。`font.rs` の `Font` が `fontdue` と同じ三つ
+          （`has_glyph` / `horizontal_line_metrics` / `rasterize`）を出す
+          薄い包みで、描画側は無変更。**字送り・行の三値・グリフの外枠は
+          五書体 × 七サイズで差 0**（手元の比較プログラムで確認）。違うのは
+          アンチエイリアスの縁だけで、墨の総量は 0.2% 以内、画素差は最大
+          64/255。**注意: `ab_glyph` の `pt_to_px_scale` は pt→px（96/72）を
+          掛ける。em で合わせるには `px × height_unscaled / units_per_em`。**
+          これを踏むと全部 1.333 倍になる。
+          tobira 全体（Linux、`wqy-zenhei.ttc` を一時的に sans 候補に足して
+          `--cli`）:
+          ```
+                        修正前              修正後
+          ASCII だけ    50.9 MiB  0.11 s    18.2 MiB  0.03 s
+          日本語 5 字  529.4 MiB  1.05 s    34.6 MiB  0.05 s
+          日本語 800  529.5 MiB  1.04 s    34.7 MiB  0.06 s
+          ```
+          **Windows（YuGothR.ttc）と ja.wikipedia での実測はまだ。**
+          `tools/resource/measure.py` で六枚を撮り直すこと。
       - **属性の量も無罪**（同日、react.dev の保存 HTML で実測）。
         HTML 266KB の **87% が属性**（4176 個、class は平均 68 文字・最長
         515 文字の Tailwind）なので容疑者に挙がったが、剥いでも変わらん:
@@ -817,6 +848,13 @@ python tools/geom/cmp.py g4.html
 ```
 
 ## Session Log
+
+### 2026-09-26 - Claude (日本語フォントのメモリ: fontdue を ab_glyph に)
+
+- 日本語 5 字で 529 MiB・1.05 秒 → 34.6 MiB・0.05 秒（Linux、wqy-zenhei）。
+  `fontdue` が開いた時点で全グリフを展開しとったのが原因。字送り・行の
+  高さ・外枠は差 0 を確かめてから替えた。詳細は「省リソース」の項の
+  【解決】。Windows と ja.wikipedia の実測は未。
 
 ### 2026-09-26 - Claude (react.dev の settle CPU: soft navigation の印が下りん件)
 
