@@ -6,7 +6,7 @@ use font8x8::{
     BASIC_FONTS, BLOCK_FONTS, BOX_FONTS, GREEK_FONTS, HIRAGANA_FONTS, LATIN_FONTS, MISC_FONTS,
     UnicodeFonts,
 };
-use fontdue::{Font, FontSettings};
+use ab_glyph::{Font as _, FontRef, FontVec, PxScale, ScaleFont as _};
 use unicode_width::UnicodeWidthChar;
 
 use crate::css::{Color, FontFamilyKind};
@@ -273,11 +273,11 @@ struct CachedLineMetrics {
 }
 
 impl FontContext {
-    /// No font file is read here. `fontdue` expands a font into roughly 40x its
-    /// file size when it parses one (measured: `segoeui.ttf` 960 KB -> 40.5 MB),
-    /// so eagerly loading sans + monospace + serif cost ~64 MB before a single
-    /// page was drawn. Each family is now read the first time something actually
-    /// asks for it, via [`Self::ensure_family_loaded`].
+    /// No font file is read here. Each family is read the first time something
+    /// actually asks for it, via [`Self::ensure_family_loaded`]. This dates from
+    /// `fontdue`, which expanded a face to about 40x its file (`segoeui.ttf`
+    /// 960 KB -> 40.5 MB); a face now costs about its file size (see [`Font`]),
+    /// but a file not read is still a file not held.
     pub fn load() -> Self {
         Self {
             sans_fonts: Vec::new(),
@@ -741,7 +741,7 @@ impl FontContext {
             return fonts;
         }
         // A family with no installed candidate borrows sans rather than holding
-        // a copy of it: cloning a `fontdue::Font` would duplicate tens of MB.
+        // a copy of it: a face holds its whole file.
         if fonts.is_empty() {
             &self.sans_fonts
         } else {
@@ -905,6 +905,109 @@ fn font_candidates(font_family: FontFamilyKind, bold: bool) -> Vec<PathBuf> {
     files.iter().map(PathBuf::from).collect()
 }
 
+/// A face, read from its file as it is used rather than all at once.
+///
+/// This was `fontdue::Font`, which turns every outline in the file into
+/// geometry the moment it is opened. For a Latin face that is 20-odd MB; for
+/// a Japanese one it is the whole cost of the page: `ipag.ttf` (6 MB, 12,728
+/// glyphs) came to +58 MiB and `wqy-zenhei.ttc` (16 MB, 44,960 glyphs) to
+/// +209 MiB and 0.7 CPU seconds, before one letter was drawn. On Windows
+/// `YuGothR.ttc` was the 275 MiB that five Japanese characters cost
+/// (`tools/scripterr/fontcost.html`). Here the face keeps the file's bytes and
+/// reads an outline when a glyph is rasterized, which the glyph cache then
+/// holds, so a face costs about its file size.
+///
+/// The interface is the three things the rest of this file used from
+/// `fontdue`, with the same numbers: advances, line metrics and glyph bounds
+/// were compared face by face and size by size and did not differ at all.
+/// Only the anti-aliased edge is drawn by another rasterizer; the total ink
+/// agrees to 0.2%.
+struct Font {
+    face: FontVec,
+    /// Font units per em over the face's own height unit: `ab_glyph` scales
+    /// by the height (ascent - descent), CSS by the em.
+    height_per_em: f32,
+}
+
+struct LineMetrics {
+    ascent: f32,
+    /// Negative, below the baseline.
+    descent: f32,
+    line_gap: f32,
+}
+
+struct GlyphMetrics {
+    advance_width: f32,
+    width: usize,
+    height: usize,
+    /// Left edge of the bitmap from the pen position.
+    xmin: i32,
+    /// Bottom edge of the bitmap from the baseline, upwards positive.
+    ymin: i32,
+}
+
+impl Font {
+    fn from_vec(bytes: Vec<u8>, index: u32) -> Option<Self> {
+        let face = FontVec::try_from_vec_and_index(bytes, index).ok()?;
+        let height_per_em = face.height_unscaled() / face.units_per_em()?;
+        Some(Self {
+            face,
+            height_per_em,
+        })
+    }
+
+    fn scale(&self, px: f32) -> PxScale {
+        PxScale::from(px * self.height_per_em)
+    }
+
+    fn has_glyph(&self, character: char) -> bool {
+        self.face.glyph_id(character).0 != 0
+    }
+
+    fn horizontal_line_metrics(&self, px: f32) -> Option<LineMetrics> {
+        let scaled = self.face.as_scaled(self.scale(px));
+        Some(LineMetrics {
+            ascent: scaled.ascent(),
+            descent: scaled.descent(),
+            line_gap: scaled.line_gap(),
+        })
+    }
+
+    /// The glyph's coverage, a byte a pixel, rows top to bottom.
+    fn rasterize(&self, character: char, px: f32) -> (GlyphMetrics, Vec<u8>) {
+        let scale = self.scale(px);
+        let id = self.face.glyph_id(character);
+        let advance_width = self.face.as_scaled(scale).h_advance(id);
+        let Some(outline) = self.face.outline_glyph(id.with_scale(scale)) else {
+            let metrics = GlyphMetrics {
+                advance_width,
+                width: 0,
+                height: 0,
+                xmin: 0,
+                ymin: 0,
+            };
+            return (metrics, Vec::new());
+        };
+        let bounds = outline.px_bounds();
+        let width = bounds.width() as usize;
+        let height = bounds.height() as usize;
+        let mut bitmap = vec![0u8; width * height];
+        outline.draw(|x, y, coverage| {
+            if let Some(cell) = bitmap.get_mut(y as usize * width + x as usize) {
+                *cell = (coverage.clamp(0.0, 1.0) * 255.0).round() as u8;
+            }
+        });
+        let metrics = GlyphMetrics {
+            advance_width,
+            width,
+            height,
+            xmin: bounds.min.x as i32,
+            ymin: -(bounds.max.y as i32),
+        };
+        (metrics, bitmap)
+    }
+}
+
 fn load_font_file(path: &Path) -> Option<Font> {
     if !path.is_file() {
         return None;
@@ -917,22 +1020,14 @@ fn load_font_file(path: &Path) -> Option<Font> {
         .unwrap_or_default()
         .to_ascii_lowercase();
 
-    if matches!(extension.as_str(), "ttc" | "otc") {
-        for collection_index in 0..4 {
-            if let Ok(font) = Font::from_bytes(
-                bytes.clone(),
-                FontSettings {
-                    collection_index,
-                    ..FontSettings::default()
-                },
-            ) {
-                return Some(font);
-            }
-        }
-        return None;
-    }
-
-    Font::from_bytes(bytes, FontSettings::default()).ok()
+    // A collection holds several faces; the first one that parses is taken.
+    // Each is tried on the borrowed bytes, so the file is not copied per try.
+    let index = if matches!(extension.as_str(), "ttc" | "otc") {
+        (0..4).find(|&index| FontRef::try_from_slice_and_index(&bytes, index).is_ok())?
+    } else {
+        0
+    };
+    Font::from_vec(bytes, index)
 }
 
 fn draw_cached_glyph(
@@ -1334,9 +1429,9 @@ mod lazy_loading_tests {
     use crate::css::MPX;
     use super::*;
 
-    /// `fontdue` expands a font to roughly 40x its file size when it parses one,
-    /// so `FontContext::load` must not touch the disk. Loading sans, monospace
-    /// and serif up front cost ~64 MB before anything was drawn.
+    /// `FontContext::load` must not touch the disk. Loading sans, monospace
+    /// and serif up front cost ~64 MB before anything was drawn under
+    /// `fontdue`, and still reads three files a page may never use.
     #[test]
     fn load_reads_no_font_files() {
         let fonts = FontContext::load();
@@ -1460,7 +1555,7 @@ mod lazy_loading_tests {
     }
 
     /// A family with no installed candidate borrows sans rather than cloning it;
-    /// cloning a `fontdue::Font` would duplicate tens of megabytes.
+    /// a face holds its whole file.
     #[test]
     fn empty_family_borrows_sans_without_copying() {
         let mut fonts = FontContext::load();

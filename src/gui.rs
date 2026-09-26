@@ -400,6 +400,27 @@ impl BrowserApp {
         }
     }
 
+    /// Bring the address bar and the current history entry to the page's
+    /// URL when the page moved itself there. A router's `history.replaceState`
+    /// during load or from a timer reaches the page as a soft navigation that
+    /// is reported once, and only a DOM event's result used to carry it here;
+    /// until 2026-09-26 the target stayed set in the engine, so the next event
+    /// happened to deliver it late.
+    fn sync_url_from_page(&mut self) {
+        let DocumentContent::Loaded(page) = &self.document.content else {
+            return;
+        };
+        if self.current_url.as_ref() == Some(&page.url) {
+            return;
+        }
+        let url = page.url.clone();
+        self.current_url = Some(url.clone());
+        if !self.address_bar.focused {
+            self.address_bar.set_text(url.to_string());
+        }
+        self.replace_current_history_entry(url);
+    }
+
     fn navigate_history(&mut self, delta: isize) {
         let Some(index) = self.history_index else {
             return;
@@ -477,6 +498,7 @@ impl BrowserApp {
                 self.document = DocumentView::from_page(page);
                 self.latest_render_frame = None;
                 self.document.layout_cache = None;
+                self.sync_url_from_page();
                 self.sync_viewport_size();
                 self.sync_window_title();
                 self.sync_input_method();
@@ -2159,6 +2181,9 @@ impl ApplicationHandler<BrowserUserEvent> for BrowserApp {
         self.last_tick_instant = Some(now);
 
         let mut changed = self.document.tick(self.engine_clock_ms);
+        if changed {
+            self.sync_url_from_page();
+        }
         // How often the animation may be restyled: sixty times a second, or as
         // often as the last restyle allows, whichever is slower.
         let anim_interval = FRAME_INTERVAL.max(self.last_anim_cost);
@@ -2699,6 +2724,7 @@ fn layout_error_document(
             text: line.clone(),
             font_size_mpx,
             line_height_px: height,
+            glyph_dy: 0,
             font_family: FontFamilyKind::Sans,
             color,
             underline: false,
@@ -4609,7 +4635,8 @@ fn render_commands(
                 // below collide with it — the "crushed/ghosted toward the top while
                 // scrolling" bug. clip_top = offset_y keeps glyphs from bleeding up
                 // into the chrome (the chrome is painted before the content).
-                let text_draw_y = offset_y as i64 + text.y as i64 - scroll_y as i64;
+                let text_draw_y =
+                    offset_y as i64 + text.y as i64 + i64::from(text.glyph_dy) - scroll_y as i64;
                 let clip_top = offset_y as i32;
                 // Draw text shadow first (behind main text)
                 if let Some(ref shadow) = text.text_shadow {
