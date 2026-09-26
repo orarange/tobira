@@ -374,11 +374,14 @@ receiver の own property 数 1 / 20 / 100 / 400 で回すと、O(幅) の処理
     `!snapshot.structural_changes.is_empty()` なので、**子リストが変わらん
     変更は全部、全体再構築に落ちる**。React がやっとるのは属性とテキストの
     書き換えで、`record_childlist_mutation` には載らん。
+    （**↑ 後半は外れ**。属性とテキストは `SetAttribute` / `SetText` で
+    元から記録されとる。下の【訂正・解決】参照）
     `tick()` の方は `html != self.html_source` で「変わった」と判定するので、
     **「変わったが増分にできん」の組み合わせが毎フレーム成立する**。
     → 268KB を parse し直して styled tree を作り直すのが **1.9 秒 × 33 回**。
-    **次の的はここ**: 属性・テキストの変更も増分で当てられるようにする
-    （engine 側に childlist 以外の mutation の記録が要る）。
+    ~~**次の的はここ**: 属性・テキストの変更も増分で当てられるようにする
+    （engine 側に childlist 以外の mutation の記録が要る）。~~
+    **↑ この段落の見立ては外れ（2026-09-26）。直下の【訂正・解決】を読むこと。**
     - **【訂正・解決】`changes: 0` は「属性とテキストが記録されとらん」
       やなかった**（2026-09-26）。`record_attribute_mutation` /
       `record_characterdata_mutation` は `SetAttribute` / `SetText` を元から

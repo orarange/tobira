@@ -400,6 +400,27 @@ impl BrowserApp {
         }
     }
 
+    /// Bring the address bar and the current history entry to the page's
+    /// URL when the page moved itself there. A router's `history.replaceState`
+    /// during load or from a timer reaches the page as a soft navigation that
+    /// is reported once, and only a DOM event's result used to carry it here;
+    /// until 2026-09-26 the target stayed set in the engine, so the next event
+    /// happened to deliver it late.
+    fn sync_url_from_page(&mut self) {
+        let DocumentContent::Loaded(page) = &self.document.content else {
+            return;
+        };
+        if self.current_url.as_ref() == Some(&page.url) {
+            return;
+        }
+        let url = page.url.clone();
+        self.current_url = Some(url.clone());
+        if !self.address_bar.focused {
+            self.address_bar.set_text(url.to_string());
+        }
+        self.replace_current_history_entry(url);
+    }
+
     fn navigate_history(&mut self, delta: isize) {
         let Some(index) = self.history_index else {
             return;
@@ -477,6 +498,7 @@ impl BrowserApp {
                 self.document = DocumentView::from_page(page);
                 self.latest_render_frame = None;
                 self.document.layout_cache = None;
+                self.sync_url_from_page();
                 self.sync_viewport_size();
                 self.sync_window_title();
                 self.sync_input_method();
@@ -2159,6 +2181,9 @@ impl ApplicationHandler<BrowserUserEvent> for BrowserApp {
         self.last_tick_instant = Some(now);
 
         let mut changed = self.document.tick(self.engine_clock_ms);
+        if changed {
+            self.sync_url_from_page();
+        }
         // How often the animation may be restyled: sixty times a second, or as
         // often as the last restyle allows, whichever is slower.
         let anim_interval = FRAME_INTERVAL.max(self.last_anim_cost);
