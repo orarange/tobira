@@ -860,6 +860,18 @@ python tools/geom/cmp.py g4.html
 
 ## Session Log
 
+### 2026-09-26 - Claude (行の高さ: 端数の繰り越し・字をベースラインに・line-height の継承)
+
+- 行の高さを 1/64px の端数ごと積むようにした（drift 1/6 → 6/6）。その途中で
+  **字が行の上端に貼り付いて描かれとる**のを見つけて直した（`glyph_dy`）。
+  `line-height` の長さ指定が比率で継承されとった件も直した。geom 137 → 145、
+  悪化 0。詳細は「次に手を付ける二つ」の①②の【解決】。
+- `fractional-line-height` の WPT が落ちとるのは行の高さやなかった。test と
+  ref の頁の縦の長さが 8px 違うだけ（6400 = 800 × 8）で、絵は同じ。
+  HANDOFF の「8px 高い」はこれ。
+- この回も Linux。Chrome は `/opt/pw-browsers/chromium-1194/chrome-linux/chrome`
+  を `--no-sandbox` で使えた。
+
 ### 2026-09-26 - Claude (日本語フォントのメモリ: fontdue を ab_glyph に)
 
 - 日本語 5 字で 529 MiB・1.05 秒 → 34.6 MiB・0.05 秒（Linux、wqy-zenhei）。
@@ -1698,6 +1710,17 @@ react.dev だけ撮らんかった一枚が退化しとった。
     こう:  cursor_y_mpx  += line_height_mpx         丸めずに足す
            その行の y = mpx_to_px(cursor_y_mpx)     置くときだけ丸める
     ```
+    **【解決】2026-09-26。下の「箱が膨らむ」は、報告する高さを別に持って解いた。**
+    - 位置: `LayoutContext::y_frac_lu`（1/64px、Chrome の LayoutUnit）に行の端数を
+      繰り越す（`advance_exact`）。**行の高さは 1/64 に切り捨て**てから積む:
+      18.4 は 18.390625。こうせんと Chrome の p15=257 / p20=349 が出ん
+      （18.4 のまま積むと 258 / 350）。
+    - 高さ: hitbox（`getBoundingClientRect`）には「正確な上端から正確な下端まで」を
+      丸めた値を渡す（`exact_box_height`）。丸めた端同士の差やないので 18 のまま。
+      塗りは画素の境目のまま（Chrome も描くときは snap する）。
+      高さを明示した箱は、終わった所で端数を始まりの値に戻す。
+    - 結果: `drift.html` **1/6 → 6/6**。
+    以下は 09-20 の試行の記録:
     **やってみた（2026-09-20）。位置は直るが箱が膨らむので戻した。**
     検体 `tools/geom/drift.html`（`line-height:1.15` の `<p>` を 20 本 +
     `<br>` 10 行の塊）で A/B:
@@ -1712,7 +1735,22 @@ react.dev だけ撮らんかった一枚が退化しとった。
     積む。**つまり位置と高さの両方を合わせるには、塊の高さ自体を
     小数で持つしかない**。累算器だけでは片方しか取れん、というのが実測。
     HN / lobste.rs の画素差は債務ありでも動かんかった（11.65% / 10.59%）。
-  - ② **負の half-leading が 0 に潰されとる**（`below_baseline`、7215）。
+  - ② **【解決 2026-09-26】負の half-leading が 0 に潰されとる**（`below_baseline`、7215）。
+    `emit_line` の above / below を**両方**符号付きにした（`below_baseline_signed`）。
+    **それより大きい穴が同時に見つかった: 字が行の上端に貼り付いとった。**
+    `TextCommand.y` は行の上端で、painter はそこから `normal` のベースラインに
+    字を吊るしとったので、`line-height:60px` の字が行の一番上、短い行の字は
+    行の下にぶら下がり、小さい字は大きい字の頭に揃っとった（ベースラインに
+    載っとらん）。`TextCommand::glyph_dy`（本当のベースライン − normal の
+    ベースライン）を足して painter が使う。**`normal` の一行はずれ 0** なので
+    大半の頁の絵は動かん。
+    同時に `line-height` の長さ指定が比率で継承されとった件も直した
+    （`line_height_fixed_mpx`、change.md に記録）。`line-height:40px` の中の
+    32px の span が 80px の行になっとった（Chrome 40）。
+    結果: `tools/geom` 全体 137 → **145/403**（悪化 0）、leading 10 → 13、
+    WPT `split-inline-borders` の画素差 199186 → 41572（通過数は 9/26 のまま）。
+    **Linux の書体違いで横は測れとらん。Windows で geom と六枚の画素差を撮り直すこと。**
+    以下は 09-20 の記録:
     `line-height` が face の自然な高さより小さいと leading は負で、仕様は
     それを半分ずつ上下に配る（字が行からはみ出す）。`saturating_sub` が
     それを 0 にしとる。WPT の `vertical-align-negative-leading-001` の名前が

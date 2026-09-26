@@ -2724,6 +2724,7 @@ fn layout_error_document(
             text: line.clone(),
             font_size_mpx,
             line_height_px: height,
+            glyph_dy: 0,
             font_family: FontFamilyKind::Sans,
             color,
             underline: false,
@@ -4634,7 +4635,8 @@ fn render_commands(
                 // below collide with it — the "crushed/ghosted toward the top while
                 // scrolling" bug. clip_top = offset_y keeps glyphs from bleeding up
                 // into the chrome (the chrome is painted before the content).
-                let text_draw_y = offset_y as i64 + text.y as i64 - scroll_y as i64;
+                let text_draw_y =
+                    offset_y as i64 + text.y as i64 + i64::from(text.glyph_dy) - scroll_y as i64;
                 let clip_top = offset_y as i32;
                 // Draw text shadow first (behind main text)
                 if let Some(ref shadow) = text.text_shadow {

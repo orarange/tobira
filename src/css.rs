@@ -1377,6 +1377,8 @@ pub fn computed_property_string(
         "line-height" => {
             if style.line_height == 0 {
                 "normal".to_string()
+            } else if style.line_height_fixed_mpx > 0 {
+                css_px_string(style.line_height_fixed_mpx)
             } else {
                 css_px_string(
                     ((style.font_size_mpx as u64 * style.line_height as u64) / 1000) as u32,
@@ -1580,7 +1582,24 @@ pub struct ComputedStyle {
     pub outline_width: u32,
     pub outline_color: Option<Color>,
     /// line-height in thousandths of em; 0 = "normal"
+    ///
+    /// Always relative to this element's own font size by the time the style
+    /// is finished, whatever it was written as -- the layout multiplies it by
+    /// `font_size_mpx` and nothing else.
     pub line_height: u32,
+    /// A `line-height` given as a length, as a length: what a child inherits.
+    /// Zero when it was a number or `normal`, which inherit as a ratio.
+    ///
+    /// A length used to be turned into a ratio of the font size it was written
+    /// beside and inherited as that ratio. `line-height: 40px` on a 16px line
+    /// then gave a 32px `<span>` inside it an 80px line where every browser
+    /// gives it 40, and `font-size: 32px; line-height: 40px` on one element
+    /// divided by the parent's size instead of its own.
+    pub line_height_fixed_mpx: u32,
+    /// `em` and `%` are of this element's own font size, which may be set by
+    /// a later declaration than the `line-height` one; resolved when the
+    /// style is finished.
+    pub line_height_em_pending: bool,
     /// opacity 0–255; 255 = opaque
     pub opacity: u8,
     pub effective_opacity: u8,
@@ -1830,6 +1849,8 @@ impl ComputedStyle {
             outline_width: 0,
             outline_color: None,
             line_height: parent.map(|s| s.line_height).unwrap_or(0),
+            line_height_fixed_mpx: parent.map(|s| s.line_height_fixed_mpx).unwrap_or(0),
+            line_height_em_pending: false,
             opacity: 255,
             effective_opacity: 255,
             font_style_italic: parent.map(|s| s.font_style_italic).unwrap_or(false),
@@ -4477,8 +4498,73 @@ fn compute_style_with_rules(
 
     blockify(&mut style, parent_style);
     apply_monospace_default_size(&mut style);
+    finish_line_height(&mut style);
 
     style
+}
+
+/// Settle `line-height` against this element's final font size: a pending
+/// `em` / `%` becomes a length, and a length -- declared here or inherited --
+/// becomes the ratio the layout reads.
+fn finish_line_height(style: &mut ComputedStyle) {
+    if style.line_height_em_pending {
+        style.line_height_em_pending = false;
+        style.line_height_fixed_mpx =
+            (u64::from(style.font_size_mpx) * u64::from(style.line_height) / 1000) as u32;
+    }
+    if style.line_height_fixed_mpx > 0 && style.font_size_mpx > 0 {
+        let ratio = (u64::from(style.line_height_fixed_mpx) * 1000
+            + u64::from(style.font_size_mpx) / 2)
+            / u64::from(style.font_size_mpx);
+        style.line_height = (ratio.min(u64::from(u32::MAX))).max(1) as u32;
+    }
+}
+
+/// Apply a `line-height` value. A number is kept as a ratio and inherits as
+/// one; a length is kept as a length and inherits as one; `em` and `%` are
+/// lengths of this element's own font size, worked out in
+/// [`finish_line_height`]. Anything unreadable leaves the property alone, as
+/// an invalid declaration does.
+fn set_line_height(style: &mut ComputedStyle, input: &str, parent_font_size_mpx: u32) {
+    let v = input.trim().to_ascii_lowercase();
+    if v == "normal" {
+        style.line_height = 0;
+        style.line_height_fixed_mpx = 0;
+        style.line_height_em_pending = false;
+        return;
+    }
+    if let Ok(f) = v.parse::<f32>() {
+        if f >= 0.0 {
+            style.line_height = (f * 1000.0).round() as u32;
+            style.line_height_fixed_mpx = 0;
+            style.line_height_em_pending = false;
+        }
+        return;
+    }
+    let relative = if let Some(rest) = v.strip_suffix('%') {
+        parse_float(rest).map(|f| f * 10.0)
+    } else if v.ends_with("em") && !v.ends_with("rem") {
+        parse_float(v.trim_end_matches("em")).map(|f| f * 1000.0)
+    } else {
+        None
+    };
+    if let Some(per_mille) = relative {
+        if per_mille >= 0.0 {
+            style.line_height = (per_mille.round() as u32).max(1);
+            style.line_height_fixed_mpx = 0;
+            style.line_height_em_pending = true;
+        }
+        return;
+    }
+    if let Some(length) = parse_length_mpx(&v, parent_font_size_mpx)
+        && length > 0
+    {
+        style.line_height_fixed_mpx = length;
+        style.line_height_em_pending = false;
+        // Made relative in `finish_line_height`; non-zero here so nothing in
+        // between reads it as `normal`.
+        style.line_height = 1;
+    }
 }
 
 /// Monospace text nobody has given a size to is 13px, not 16px.
@@ -5552,7 +5638,7 @@ fn apply_declaration(style: &mut ComputedStyle, declaration: &Declaration, paren
             style.outline_color = parse_color(value);
         }
         "line-height" => {
-            style.line_height = parse_line_height(value, parent_font_size_mpx);
+            set_line_height(style, value, parent_font_size_mpx);
         }
         "opacity" => {
             if let Ok(f) = value.trim().parse::<f32>() {
@@ -8122,46 +8208,6 @@ fn parse_box_shadow(value: &str, font_size_mpx: u32) -> Option<BoxShadow> {
     })
 }
 
-fn parse_line_height(input: &str, parent_font_size_mpx: u32) -> u32 {
-    let v = input.trim().to_ascii_lowercase();
-    if v == "normal" {
-        return 0;
-    }
-    // unitless multiplier
-    if let Ok(f) = v.parse::<f32>() {
-        return (f * 1000.0).round() as u32;
-    }
-    // px
-    if let Some(rest) = v.strip_suffix("px") {
-        if let Some(px) = parse_float(rest) {
-            // store as em thousandths relative to parent_font_size_mpx
-            // `line-height` is kept as a ratio in thousandths, so a length
-            // has to be divided by the font size it sits on -- in pixels, not
-            // in thousandths of one.
-            let basis = if parent_font_size_mpx > 0 {
-                mpx_to_f32(parent_font_size_mpx)
-            } else {
-                mpx_to_f32(INITIAL_FONT_SIZE_MPX)
-            };
-            let em = px / basis;
-            return (em * 1000.0).round() as u32;
-        }
-    }
-    // em
-    if let Some(rest) = v.strip_suffix("em") {
-        if let Some(f) = parse_float(rest) {
-            return (f * 1000.0).round() as u32;
-        }
-    }
-    // %
-    if let Some(rest) = v.strip_suffix('%') {
-        if let Some(f) = parse_float(rest) {
-            return (f * 10.0).round() as u32; // percent/100 * 1000
-        }
-    }
-    0
-}
-
 /// Parse a border shorthand like "1px solid red" or "none"
 fn parse_border_shorthand(style: &mut ComputedStyle, value: &str, parent_font_size_mpx: u32) {
     let v = value.trim().to_ascii_lowercase();
@@ -8297,7 +8343,7 @@ fn parse_font_shorthand(style: &mut ComputedStyle, value: &str, parent_font_size
                 style.font_size_is_medium = font_size_keeps_the_default_basis(parts[0]);
             }
             if parts.len() > 1 {
-                style.line_height = parse_line_height(parts[1], style.font_size_mpx);
+                set_line_height(style, parts[1], parent_font_size_mpx);
             }
             continue;
         }

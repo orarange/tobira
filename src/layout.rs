@@ -458,6 +458,17 @@ pub struct TextCommand {
     pub text: String,
     pub font_size_mpx: u32,
     pub line_height_px: u32,
+    /// How far below `y` the glyphs are drawn, `y` being the top of the line.
+    ///
+    /// The painter hangs a run's letters from the top of the box it is given,
+    /// which puts the baseline where a `line-height: normal` line of that run
+    /// would have it. That is right only for a line of one size at its normal
+    /// spacing. A `line-height: 60px` line drew its text against its top edge
+    /// where every browser centres it, and a small run beside a large one sat
+    /// level with the large one's top instead of on the shared baseline. This
+    /// is the difference, so the letters land on the baseline the line box
+    /// was built around. Negative when the line is shorter than the letters.
+    pub glyph_dy: i32,
     pub font_family: FontFamilyKind,
     pub color: Color,
     pub underline: bool,
@@ -800,6 +811,39 @@ struct LayoutContext {
     /// Boxes placed by `bottom` with `top` auto, waiting for the height of the
     /// block that contains them.
     pending_bottom: Vec<PendingBottom>,
+    /// Where the flow really is, below the whole pixel `cursor_y` stands on,
+    /// in 64ths of a pixel -- the unit Chrome lays out in. Between -32 and 31:
+    /// the cursor is the true position rounded.
+    ///
+    /// Lines are rarely a whole number of pixels tall (`line-height: 1.15` at
+    /// 16px is 18.4), and adding each one rounded lost 0.4px a line: twenty
+    /// paragraphs came out 7px short of Chrome, and a long page drew a second
+    /// copy of itself sliding down under the first in the pixel diff. The
+    /// cursor still moves in whole pixels; the part it could not move carries
+    /// into the next line instead of being dropped.
+    y_frac_lu: i32,
+}
+
+/// Pixels in Chrome's `LayoutUnit`.
+const LU_PER_PX: i64 = 64;
+
+/// Move `cursor_y` by an exact height in 64ths of a pixel, carrying what does
+/// not make a whole pixel in `context.y_frac_lu`.
+fn advance_exact(cursor_y: &mut u32, height_lu: i64, context: &mut LayoutContext) {
+    let total = i64::from(context.y_frac_lu) + height_lu;
+    // Rounded half up, the way the page's own `Math.round` of a rect reads it.
+    let pixels = (total + LU_PER_PX / 2).div_euclid(LU_PER_PX);
+    context.y_frac_lu = (total - pixels * LU_PER_PX) as i32;
+    *cursor_y = (i64::from(*cursor_y) + pixels).clamp(0, i64::from(u32::MAX)) as u32;
+}
+
+/// A box's height as a page reads it: the exact distance between its two
+/// edges, rounded -- not the difference of the two rounded edges. Twenty
+/// `line-height: 1.15` lines stand 367.8px apart; each 18.4px paragraph is
+/// reported 18 tall even where its rounded edges land 19 apart.
+fn exact_box_height(height_px: u32, frac_start: i32, frac_end: i32) -> u32 {
+    let exact = i64::from(height_px) * LU_PER_PX + i64::from(frac_end) - i64::from(frac_start);
+    ((exact + LU_PER_PX / 2).div_euclid(LU_PER_PX)).max(0) as u32
 }
 
 /// A box anchored to the bottom of its containing block.
@@ -851,6 +895,7 @@ impl Default for LayoutContext {
             next_stacking_seq: 0,
             lines_emitted: 0,
             pending_bottom: Vec::new(),
+            y_frac_lu: 0,
         }
     }
 }
@@ -2398,6 +2443,7 @@ fn layout_block_element(
     let _ = width_is_constrained;
 
     let background_top = *cursor_y;
+    let frac_at_top = context.y_frac_lu;
 
     // Detect stacking context: element has opacity < 255, filter: blur(), or CSS transform scale/rotate
     let needs_layer = element.style.opacity < 255
@@ -2734,6 +2780,17 @@ fn layout_block_element(
         settle_bottom_anchored(context, pending_mark, background_top, background_height);
     }
 
+    // A box whose content set its height ends where the content really ends,
+    // part-pixel and all. One whose height was imposed -- a stated height, a
+    // ratio, a stretch -- is that many whole pixels from its true top, so the
+    // part-pixel it started on is where the flow stands again after it.
+    let reported_height = if background_height == content_height {
+        exact_box_height(background_height, frac_at_top, context.y_frac_lu)
+    } else {
+        context.y_frac_lu = frac_at_top;
+        background_height
+    };
+
     // Emit element hitbox for interactive state (hover/focus) detection
     if let Some(node_id) = element_node_id(element) {
         // A flat or hairline box is still a box: `getBoundingClientRect` on a
@@ -2753,7 +2810,7 @@ fn layout_block_element(
                 x: outer_x,
                 y: background_top,
                 width: outer_width,
-                height: background_height,
+                height: reported_height,
                 cursor_kind: element.style.cursor_kind,
                 scroll_width,
                 scroll_height,
@@ -5042,6 +5099,7 @@ fn offset_draw_command(cmd: &DrawCommand, offset_x: u32, offset_y: u32) -> DrawC
             text: text.text.clone(),
             font_size_mpx: text.font_size_mpx,
             line_height_px: text.line_height_px,
+            glyph_dy: text.glyph_dy,
             font_family: text.font_family,
             color: text.color,
             underline: text.underline,
@@ -6775,7 +6833,8 @@ fn emit_line_impl(
         // element that wrote no content; they are dropped rather than carried
         // into the next line, where they would name the wrong place.
         line.spans.clear();
-        *cursor_y = cursor_y.saturating_add(text_line_height(container_style, fonts));
+        let height_lu = text_line_height_lu(container_style, fonts);
+        advance_exact(cursor_y, height_lu, context);
         return;
     }
 
@@ -6811,15 +6870,21 @@ fn emit_line_impl(
     // Everything on a line is hung from the same baseline. A box taller than
     // the text grows the line downwards, not upwards -- so a 40px badge beside
     // a line of type has its top level with the text's, not its bottom.
-    let strut_below = below_baseline(container_style, fonts);
-    let mut above = text_line_height(container_style, fonts).saturating_sub(strut_below);
+    //
+    // Both halves are signed. A line shorter than its letters has negative
+    // leading, and the standard splits it above and below just as it does a
+    // positive one: the letters overhang the line on both sides. Floored at
+    // zero, the whole shortfall came off the top instead, and the text of a
+    // `line-height: 6px` line hung below it.
+    let strut_below = below_baseline_signed(container_style, fonts);
+    let mut above = text_line_height(container_style, fonts) as i32 - strut_below;
     let mut below = strut_below;
     let mut min_line_height = 0_u32;
     for span in &line.spans {
         if span.control.is_some() {
             // A control is centred on the line rather than hung from it.
-            above = above.max(span.height / 2);
-            below = below.max(span.height - span.height / 2);
+            above = above.max((span.height / 2) as i32);
+            below = below.max((span.height - span.height / 2) as i32);
             continue;
         }
         // A box aligned to the top or the bottom of the line is not hung
@@ -6835,36 +6900,35 @@ fn emit_line_impl(
             min_line_height = min_line_height.max(span.height);
             continue;
         }
-        let span_above = if let Some(atomic) = &span.atomic {
-            match span.style.vertical_align {
+        let (span_above, span_below) = if let Some(atomic) = &span.atomic {
+            let span_above = match span.style.vertical_align {
                 // The box's middle sits half an x-height above the baseline.
                 VerticalAlign::Middle => span
                     .height
                     .div_ceil(2)
                     .saturating_add(x_half_height(&span.style)),
                 _ => atomic_span_baseline(atomic, &span.style, span.height, fonts),
-            }
+            };
+            (span_above as i32, span.height.saturating_sub(span_above) as i32)
         } else if span.image.is_some() {
-            span.height
+            (span.height as i32, 0)
         } else {
-            text_line_height(&span.style, fonts).saturating_sub(below_baseline(&span.style, fonts))
+            let span_below = below_baseline_signed(&span.style, fonts);
+            (text_line_height(&span.style, fonts) as i32 - span_below, span_below)
         };
         // A raised or lowered run is that much further from the baseline, so
         // the line has to make room for it: a superscript on the first line of
         // a paragraph must not be cut off by the box above.
         let shift = span.style.baseline_shift;
-        above = above.max(span_above.saturating_add_signed(-shift));
-        below = below.max(
-            span.height
-                .saturating_sub(span_above)
-                .saturating_add_signed(shift),
-        );
+        above = above.max(span_above - shift);
+        below = below.max(span_below + shift);
     }
-    let line_height = above
-        .saturating_add(below)
-        .max(line.line_height.min(above + below).max(1))
-        .max(min_line_height);
-    let baseline = above;
+    let line_height = (above + below).max(1) as u32;
+    let line_height = line_height.max(min_line_height);
+    // Where the baseline stands below the top of the line. It can sit above
+    // the top only if the whole line is overhang, which nothing lays out.
+    let baseline_signed = above;
+    let baseline = above.max(0) as u32;
     // The height an inline element falls back to when its runs have not been
     // walked yet, or when it wrote nothing at all: its CONTENT area, not the
     // line's advance. Two spans on one line disagreed because of this -- the
@@ -6906,15 +6970,14 @@ fn emit_line_impl(
                 text_content_height(&span.style, fonts)
             };
             let run_above = if span.atomic.is_some() || span.image.is_some() {
-                span.height
+                span.height as i32
             } else {
-                text_line_height(&span.style, fonts)
-                    .saturating_sub(below_baseline(&span.style, fonts))
+                text_line_height(&span.style, fonts) as i32
+                    - below_baseline_signed(&span.style, fonts)
             };
-            let top = cursor_y
-                .saturating_add(baseline)
-                .saturating_sub(run_above)
-                .saturating_add_signed(span.style.baseline_shift);
+            let top = (i64::from(*cursor_y) + i64::from(baseline_signed) - i64::from(run_above)
+                + i64::from(span.style.baseline_shift))
+            .max(0) as u32;
             let bottom = top.saturating_add(run_height);
             let right = cursor_x.saturating_add(span.width);
             for node_id in &open_inlines {
@@ -7105,6 +7168,7 @@ fn emit_line_impl(
             text: display_text,
             font_size_mpx: span.style.font_size_mpx,
             line_height_px: line_height,
+            glyph_dy: baseline_signed - normal_baseline(&span.style, fonts),
             font_family: span.style.font_family,
             color: apply_opacity(span.style.color, context.background_color, span_opacity),
             underline: span.style.underline,
@@ -7142,7 +7206,18 @@ fn emit_line_impl(
         context,
     );
 
-    *cursor_y = cursor_y.saturating_add(line_height);
+    // A line no taller than its strut is exactly the strut's height, which is
+    // rarely a whole pixel; one that something taller stretched is as tall as
+    // that, in whole pixels.
+    let strut_lu = text_line_height_lu(container_style, fonts);
+    let height_lu = if i64::from(line_height) * LU_PER_PX <= strut_lu + LU_PER_PX / 2
+        && line_height == text_line_height(container_style, fonts)
+    {
+        strut_lu
+    } else {
+        i64::from(line_height) * LU_PER_PX
+    };
+    advance_exact(cursor_y, height_lu, context);
     line.spans.clear();
     line.markers.clear();
     line.width = 0;
@@ -7208,11 +7283,43 @@ fn below_baseline(style: &ComputedStyle, fonts: &mut FontContext) -> u32 {
     let descent = fonts.descent_px(font_size, style.font_family);
     let content = fonts.line_height_px(font_size, style.font_family);
     let line_height = if style.line_height > 0 {
-        line_height_from_ratio(font_size, style.line_height)
+        style_line_height_px(style)
     } else {
         content
     };
     line_height.saturating_sub(content) / 2 + descent
+}
+
+/// [`below_baseline`] without the floor: with a `line-height` shorter than the
+/// letters, the leading is negative and half of it comes off below, so the
+/// descenders hang out of the line.
+fn below_baseline_signed(style: &ComputedStyle, fonts: &mut FontContext) -> i32 {
+    let font_size = style.font_size_mpx;
+    let descent = fonts.descent_px(font_size, style.font_family) as i32;
+    let content = fonts.line_height_px(font_size, style.font_family) as i32;
+    let line_height = if style.line_height > 0 {
+        style_line_height_px(style) as i32
+    } else {
+        content
+    };
+    (line_height - content) / 2 + descent
+}
+
+/// A stated `line-height` in whole pixels: the length itself where one was
+/// given, otherwise the ratio times the font size.
+fn style_line_height_px(style: &ComputedStyle) -> u32 {
+    if style.line_height_fixed_mpx > 0 {
+        crate::css::mpx_to_px(style.line_height_fixed_mpx)
+    } else {
+        line_height_from_ratio(style.font_size_mpx, style.line_height)
+    }
+}
+
+/// Where the painter puts the baseline of a run it is handed a line top for:
+/// that of a `line-height: normal` line of the run's own size and face.
+fn normal_baseline(style: &ComputedStyle, fonts: &mut FontContext) -> i32 {
+    let normal = fonts.line_height_px(style.font_size_mpx, style.font_family) as i32;
+    normal - fonts.descent_px(style.font_size_mpx, style.font_family) as i32
 }
 
 /// `line-height` as a whole number of pixels: a font size in `css::MPX`ths of
@@ -7263,9 +7370,25 @@ fn text_content_height(style: &ComputedStyle, fonts: &mut FontContext) -> u32 {
     fonts.content_height_px(style.font_size_mpx, style.font_family)
 }
 
+/// The line height in 64ths of a pixel, floored the way Chrome stores it:
+/// `1.15` at 16px is 18.4px, kept as 18.390625. Twenty of them are 367.8, which
+/// is where Chrome puts the twenty-first line -- 18.4 exactly would be 368.
+fn text_line_height_lu(style: &ComputedStyle, fonts: &mut FontContext) -> i64 {
+    if style.line_height_fixed_mpx > 0 {
+        i64::from(style.line_height_fixed_mpx) * LU_PER_PX / i64::from(crate::css::MPX)
+    } else if style.line_height > 0 {
+        let scale = 1000 * i64::from(crate::css::MPX);
+        i64::from(style.font_size_mpx) * i64::from(style.line_height) * LU_PER_PX / scale
+    } else {
+        // `normal` is the face's own parts rounded apart and added, which is a
+        // whole number of pixels already.
+        i64::from(fonts.line_height_px(style.font_size_mpx, style.font_family)) * LU_PER_PX
+    }
+}
+
 fn text_line_height(style: &ComputedStyle, fonts: &mut FontContext) -> u32 {
     if style.line_height > 0 {
-        line_height_from_ratio(style.font_size_mpx, style.line_height)
+        style_line_height_px(style)
     } else {
         fonts.line_height_px(style.font_size_mpx, style.font_family)
     }
@@ -13101,6 +13224,38 @@ mod tests {
             l.texts().into_iter().any(|text| text.x >= 100),
             "the line beside the float should start past it"
         );
+    }
+
+    #[test]
+    fn fractional_line_heights_do_not_drift() {
+        // Checked against Chrome (`tools/geom/drift.html`): twenty
+        // `line-height: 1.15` paragraphs at 16px stand 18.390625px apart --
+        // the 18.4 floored to Chrome's 64ths -- so the twentieth starts at
+        // 349. Adding each line rounded to 18 put it at 342.
+        let mut html = String::from(r#"<html><body style="font-size:16px">"#);
+        for i in 1..=20 {
+            html.push_str(&format!(r#"<p style="background:#aa{i:04x}">line</p>"#));
+        }
+        html.push_str("</body></html>");
+        let l = probe_layout_with_css(&html, "p { margin: 0; line-height: 1.15 }", 800);
+        assert_eq!(probe_rect(&l, 0xAA0005).expect("p5").y, 74);
+        assert_eq!(probe_rect(&l, 0xAA000F).expect("p15").y, 257);
+        assert_eq!(probe_rect(&l, 0xAA0014).expect("p20").y, 349);
+    }
+
+    #[test]
+    fn a_line_height_length_is_inherited_as_a_length() {
+        // `line-height: 40px` is 40px for every descendant, whatever its font
+        // size. It was inherited as a ratio of the 16px it was written beside,
+        // so a 32px span inside made its line 80px; Chrome makes it 46.
+        let l = probe_layout(
+            r#"<html><body style="margin:0;font-size:16px">
+                <div style="background:#aa0001;line-height:40px">a <span style="font-size:32px">BIG</span> b</div>
+            </body></html>"#,
+            800,
+        );
+        let height = probe_rect(&l, 0xAA0001).expect("line").height;
+        assert!((40..=50).contains(&height), "line was {height}px tall");
     }
 
     #[test]
