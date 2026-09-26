@@ -84,6 +84,22 @@ impl BrowserPage {
             self.engine_pending = snapshot.has_pending_work;
             return;
         }
+        // A same-document navigation that left the DOM alone (a router's
+        // `history.replaceState` at hydration) moves the URL and nothing else.
+        // The page's resources were resolved against the old URL and stay
+        // loaded, as they do in a browser, so there is nothing to rebuild.
+        if dom_unchanged
+            && snapshot.navigation_target.is_none()
+            && let Some(url) = snapshot
+                .soft_navigation_target
+                .as_deref()
+                .and_then(|target| Url::parse(target).ok())
+        {
+            self.url = url;
+            self.scroll_y = snapshot.scroll_y;
+            self.engine_pending = snapshot.has_pending_work;
+            return;
+        }
         let pending = snapshot.has_pending_work;
         let include_rendered_output = self.rendered.is_some();
         let javascript_session = self.javascript_session.take();
@@ -5055,6 +5071,44 @@ mod tests {
             "unchanged HTML must not rebuild the page"
         );
         assert_eq!(page.scroll_y(), 320);
+    }
+
+    #[test]
+    fn apply_script_snapshot_moves_url_without_rebuild_on_soft_navigation() {
+        // `history.replaceState` with the DOM untouched changes the URL and
+        // nothing else; rebuilding the document for it was pure cost.
+        let html = "<html><body><p>hi</p></body></html>";
+        let url = Url::parse("https://example.com/").unwrap();
+        let (processed, session) = start_document_script_session(html, &url, String::new());
+        let mut page = rebuild_page_from_html(
+            &url,
+            200,
+            "OK".to_string(),
+            Some("text/html".to_string()),
+            &processed.html,
+            processed.title_override.clone(),
+            true,
+            0,
+            session,
+            processed.node_order.clone(),
+        );
+        let baseline_revision = page.layout_revision();
+
+        let snapshot = crate::js::ProcessedScriptHtml {
+            html: page.html_source.clone(),
+            title_override: None,
+            console_logs: Vec::new(),
+            navigation_target: None,
+            soft_navigation_target: Some("https://example.com/app".to_string()),
+            scroll_y: 0,
+            has_pending_work: false,
+            structural_changes: Vec::new(),
+            node_order: Vec::new(),
+        };
+        page.apply_script_snapshot(snapshot);
+
+        assert_eq!(page.layout_revision(), baseline_revision);
+        assert_eq!(page.url.to_string(), "https://example.com/app");
     }
 
     #[test]

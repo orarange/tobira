@@ -379,6 +379,32 @@ receiver の own property 数 1 / 20 / 100 / 400 で回すと、O(幅) の処理
     → 268KB を parse し直して styled tree を作り直すのが **1.9 秒 × 33 回**。
     **次の的はここ**: 属性・テキストの変更も増分で当てられるようにする
     （engine 側に childlist 以外の mutation の記録が要る）。
+    - **【訂正・解決】`changes: 0` は「属性とテキストが記録されとらん」
+      やなかった**（2026-09-26）。`record_attribute_mutation` /
+      `record_characterdata_mutation` は `SetAttribute` / `SetText` を元から
+      積んどる。しかも tick は `snapshot_lazy` で、変更が 0 なら html は
+      **空**で返る。**変更 0 で 268KB の html が来とる**のは、変更以外の
+      理由で no-op が崩れとる形やった。
+      → **犯人は soft navigation の印が消えんこと**。`soft_navigation` は
+      `history.replaceState` で立って**二度と下りん**（snapshot が
+      clone で読むだけ）。Next.js は hydration で `replaceState` を一回
+      呼ぶので、以降**timer が走ったフレームは全部「移動した」扱い**:
+      engine は全文を直列化し、browser は soft nav なので増分経路を
+      最初から外して全体再構築、`tick()` も changed=true を返して
+      layout と geometry の feed まで回る。react.dev の 34/125 は
+      `setInterval(fn, 60)` が走るフレームの数とちょうど合う。
+      **DOM は一度も変わっとらんかった。**
+      検体 `tools/scripterr/softnav.html`（最小）と
+      `softnav_heavy.html`（1800 要素 + 60ms interval）。heavy で
+      **33 回の全体再構築・3.5 秒 → 0 回・0.31 秒**。前は quiet 判定も
+      効かず予算 125 フレームを使い切っとった。今は 8 フレームで抜ける。
+      直し方: ① `take_soft_navigation_target` で**一回渡したら下ろす**
+      ② browser 側で「DOM 不変 + soft nav だけ」なら**URL を差し替えて
+      終わり**（資源は旧 URL で解決済みのまま。ブラウザと同じ）。
+      **react.dev の実測はまだ**（この回の環境から react.dev に出られん
+      かった）。Windows で `TOBIRA_TIME_LAYOUT=1` を回して、
+      `not eligible` の行と CPU 秒を数えること。**属性の増分化は、
+      それでもまだ全体再構築が残っとったら考える**（今は根拠が無い）。
     - **容疑者①「stylesheet を毎回パースし直しとる」は外れ**（同日実測）。
       `collect_stylesheet` は確かに再構築のたびに全部パースし直しとる
       （`STYLESHEET_MEMO` はテキストだけの memo）が、**6 ms / 回、
@@ -788,6 +814,19 @@ python tools/geom/cmp.py g4.html
 ```
 
 ## Session Log
+
+### 2026-09-26 - Claude (react.dev の settle CPU: soft navigation の印が下りん件)
+
+- 「差分適用が 34 回中 33 回断られる」を追うた。前の見立て（属性・テキストが
+  記録されとらん）は外れで、`history.replaceState` の soft navigation の印が
+  消えんせいで、DOM 不変のフレームが全部「移動」扱いになっとった。
+  一回渡したら下ろす + URL だけの変更は再構築せん、の二つで直した。
+  合成頁で 3.5 秒 → 0.31 秒、全体再構築 33 → 0。詳細は「省リソース」の項。
+- この回は Linux のクラウド環境。Windows のフォントが無いので
+  `cargo test --release --no-fail-fast` はフォント・字幅系の 7 本が
+  **修正前から**落ちる（1199 通過 / 7 落ち、修正前は 1197 / 7。
+  差の 2 本は足したテスト）。html5lib は 1213/1229 で不変。
+  外に出られるのは許可されたホストだけで、react.dev の実測はできとらん。
 
 ### 2026-09-18 - Claude (Windows、Mac 側の Claude と往復しながら)
 
