@@ -111,6 +111,11 @@ tick を一度も回しとらんかった。frame ごとに relayout して geom
 `TOBIRA_H5_FILE`、`TOBIRA_INCREMENTAL_RESTYLE`。
 
 Chrome との突き合わせは `tools/geom/`（README 参照）。参照ブラウザは **Chrome ヘッドレス**。
+Linux のクラウド環境でも回る（2026-09-26）:
+`CHROME_PATH=/opt/pw-browsers/chromium-1194/chrome-linux/chrome TOBIRA_PATH=$PWD/target/release/tobira python3 tools/geom/cmp.py drift.html`。
+**ただし横の数字は使えん**: tobira は名前指定の family（`arial` 等）を
+Windows でしか引かんので DejaVu Sans に落ち、Chrome とは別の書体になる
+（fsize 0/12・units 0/9 は全部これ）。縦（行の高さ・drift）は比べられる。
 Edge は 2026-08-27 の更新以降 `--dump-dom` が無出力になったので使えん。
 
 **数値だけ見るな。** 表が指定幅を無視する件も `<center>` が表を中央寄せせん件も、
@@ -684,7 +689,13 @@ receiver の own property 数 1 / 20 / 100 / 400 で回すと、O(幅) の処理
    小さい要素を tag/class/深さ付きで出す。`--dump-styled` は浅いので
    これが一番速い。
 
-2. **`font-size` の端数** — `LengthValue` が u32 なので `10pt`（13.333px）が
+2. **【済・2026-09-20】`font-size` の端数** — 1/10000 px の固定小数
+   （`font_size_mpx`）で解決済み。詳細は Session Log の「font-size を整数 px から
+   1/10000 px の固定小数にした」。**この項は 09-26 まで未着手のまま残っとった
+   （ドリフト）。** 端数の話で残っとるのは**行の高さ**の方
+   （`line_height_from_ratio` の丸めと負の half-leading、`tools/geom/drift.html`
+   で 20 行 7px）。以下は着手前の記述で、記録として残す。
+   旧: `LengthValue` が u32 なので `10pt`（13.333px）が
    13px になる。**縦への影響はほぼ無いと測って分かった**
    （`tools/geom/lineheight2.html` が 7/14 で、行の高さが変わるのは
    七形のうち一形だけ）。効くのは**横**で、`fsize.html` の残り 9 件と

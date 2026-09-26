@@ -49,6 +49,9 @@ def chrome(url):
             CHROME,
             "--headless",
             "--disable-gpu",
+            # Chrome refuses to start as root without it, which is how the
+            # Linux cloud containers run.
+            *(["--no-sandbox"] if os.name != "nt" else []),
             # A throwaway profile, or a running Chrome steals the invocation.
             "--user-data-dir=" + os.path.join(HERE, "cud"),
             "--window-size=1280,900",
