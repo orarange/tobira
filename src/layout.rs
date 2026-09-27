@@ -6876,15 +6876,17 @@ fn emit_line_impl(
     // positive one: the letters overhang the line on both sides. Floored at
     // zero, the whole shortfall came off the top instead, and the text of a
     // `line-height: 6px` line hung below it.
-    let strut_below = below_baseline_signed(container_style, fonts);
-    let mut above = text_line_height(container_style, fonts) as i32 - strut_below;
-    let mut below = strut_below;
+    //
+    // Kept in 64ths of a pixel: a line of `line-height: 1.15` is 18.390625px
+    // tall, and the part-pixel carries into the next line (`advance_exact`).
+    let px = LU_PER_PX;
+    let (mut above, mut below) = text_extent_lu(container_style, fonts);
     let mut min_line_height = 0_u32;
     for span in &line.spans {
         if span.control.is_some() {
             // A control is centred on the line rather than hung from it.
-            above = above.max((span.height / 2) as i32);
-            below = below.max((span.height - span.height / 2) as i32);
+            above = above.max(i64::from(span.height / 2) * px);
+            below = below.max(i64::from(span.height - span.height / 2) * px);
             continue;
         }
         // A box aligned to the top or the bottom of the line is not hung
@@ -6909,26 +6911,32 @@ fn emit_line_impl(
                     .saturating_add(x_half_height(&span.style)),
                 _ => atomic_span_baseline(atomic, &span.style, span.height, fonts),
             };
-            (span_above as i32, span.height.saturating_sub(span_above) as i32)
+            (
+                i64::from(span_above) * px,
+                i64::from(span.height.saturating_sub(span_above)) * px,
+            )
         } else if span.image.is_some() {
-            (span.height as i32, 0)
+            (i64::from(span.height) * px, 0)
         } else {
-            let span_below = below_baseline_signed(&span.style, fonts);
-            (text_line_height(&span.style, fonts) as i32 - span_below, span_below)
+            text_extent_lu(&span.style, fonts)
         };
         // A raised or lowered run is that much further from the baseline, so
         // the line has to make room for it: a superscript on the first line of
         // a paragraph must not be cut off by the box above.
-        let shift = span.style.baseline_shift;
+        let shift = i64::from(span.style.baseline_shift) * px;
         above = above.max(span_above - shift);
         below = below.max(span_below + shift);
     }
-    let line_height = (above + below).max(1) as u32;
-    let line_height = line_height.max(min_line_height);
-    // Where the baseline stands below the top of the line. It can sit above
-    // the top only if the whole line is overhang, which nothing lays out.
-    let baseline_signed = above;
-    let baseline = above.max(0) as u32;
+    // Never less than a pixel, as before: an empty-looking line still steps.
+    let line_height_lu = (above + below)
+        .max(px)
+        .max(i64::from(min_line_height) * px);
+    let line_height = ((line_height_lu + px / 2).div_euclid(px)).max(1) as u32;
+    // Where the baseline stands below the top of the line -- a whole number
+    // of pixels, since the leading above it is floored to one. It can sit
+    // above the top only if the whole line is overhang.
+    let baseline_signed = above.div_euclid(px) as i32;
+    let baseline = baseline_signed.max(0) as u32;
     // The height an inline element falls back to when its runs have not been
     // walked yet, or when it wrote nothing at all: its CONTENT area, not the
     // line's advance. Two spans on one line disagreed because of this -- the
@@ -6969,11 +6977,14 @@ fn emit_line_impl(
             } else {
                 text_content_height(&span.style, fonts)
             };
+            // A run of text covers its content area: from its ascent above
+            // the baseline to its descent below, whatever the line spacing.
             let run_above = if span.atomic.is_some() || span.image.is_some() {
                 span.height as i32
             } else {
-                text_line_height(&span.style, fonts) as i32
-                    - below_baseline_signed(&span.style, fonts)
+                fonts
+                    .rounded_ascent_descent_px(span.style.font_size_mpx, span.style.font_family)
+                    .0
             };
             let top = (i64::from(*cursor_y) + i64::from(baseline_signed) - i64::from(run_above)
                 + i64::from(span.style.baseline_shift))
@@ -7168,7 +7179,8 @@ fn emit_line_impl(
             text: display_text,
             font_size_mpx: span.style.font_size_mpx,
             line_height_px: line_height,
-            glyph_dy: baseline_signed - normal_baseline(&span.style, fonts),
+            glyph_dy: baseline_signed
+                - fonts.painted_ascent_px(span.style.font_size_mpx, span.style.font_family),
             font_family: span.style.font_family,
             color: apply_opacity(span.style.color, context.background_color, span_opacity),
             underline: span.style.underline,
@@ -7206,18 +7218,7 @@ fn emit_line_impl(
         context,
     );
 
-    // A line no taller than its strut is exactly the strut's height, which is
-    // rarely a whole pixel; one that something taller stretched is as tall as
-    // that, in whole pixels.
-    let strut_lu = text_line_height_lu(container_style, fonts);
-    let height_lu = if i64::from(line_height) * LU_PER_PX <= strut_lu + LU_PER_PX / 2
-        && line_height == text_line_height(container_style, fonts)
-    {
-        strut_lu
-    } else {
-        i64::from(line_height) * LU_PER_PX
-    };
-    advance_exact(cursor_y, height_lu, context);
+    advance_exact(cursor_y, line_height_lu, context);
     line.spans.clear();
     line.markers.clear();
     line.width = 0;
@@ -7290,19 +7291,30 @@ fn below_baseline(style: &ComputedStyle, fonts: &mut FontContext) -> u32 {
     line_height.saturating_sub(content) / 2 + descent
 }
 
-/// [`below_baseline`] without the floor: with a `line-height` shorter than the
-/// letters, the leading is negative and half of it comes off below, so the
-/// descenders hang out of the line.
-fn below_baseline_signed(style: &ComputedStyle, fonts: &mut FontContext) -> i32 {
-    let font_size = style.font_size_mpx;
-    let descent = fonts.descent_px(font_size, style.font_family) as i32;
-    let content = fonts.line_height_px(font_size, style.font_family) as i32;
-    let line_height = if style.line_height > 0 {
-        style_line_height_px(style) as i32
-    } else {
-        content
-    };
-    (line_height - content) / 2 + descent
+/// How far a run of text reaches above and below the baseline, in 64ths of a
+/// pixel, once its `line-height` is spread around its letters.
+///
+/// The way Chrome builds it: the face's ascent and descent each rounded to a
+/// whole pixel, the leading being `line-height` minus their sum, and the half
+/// of the leading that goes above the letters floored to a whole pixel -- the
+/// rest goes below. Negative leading is split the same way, so a line shorter
+/// than its letters has them overhanging it on both sides. `line-height:
+/// 10px` beside a 22px run gives a 12px line with the run's top 8px above the
+/// line's, which is what Chrome reports; spreading it by halving whole
+/// pixels towards zero gave 11 and a run pinned to the top of its line.
+fn text_extent_lu(style: &ComputedStyle, fonts: &mut FontContext) -> (i64, i64) {
+    let px = LU_PER_PX;
+    let (ascent, descent) =
+        fonts.rounded_ascent_descent_px(style.font_size_mpx, style.font_family);
+    let line_height = text_line_height_lu(style, fonts);
+    let leading = line_height - i64::from(ascent + descent) * px;
+    // Halved towards zero, as a LayoutUnit divides, then floored to a pixel.
+    let above_leading = (leading / 2).div_euclid(px) * px;
+    let below_leading = leading - above_leading;
+    (
+        i64::from(ascent) * px + above_leading,
+        i64::from(descent) * px + below_leading,
+    )
 }
 
 /// A stated `line-height` in whole pixels: the length itself where one was
@@ -7313,13 +7325,6 @@ fn style_line_height_px(style: &ComputedStyle) -> u32 {
     } else {
         line_height_from_ratio(style.font_size_mpx, style.line_height)
     }
-}
-
-/// Where the painter puts the baseline of a run it is handed a line top for:
-/// that of a `line-height: normal` line of the run's own size and face.
-fn normal_baseline(style: &ComputedStyle, fonts: &mut FontContext) -> i32 {
-    let normal = fonts.line_height_px(style.font_size_mpx, style.font_family) as i32;
-    normal - fonts.descent_px(style.font_size_mpx, style.font_family) as i32
 }
 
 /// `line-height` as a whole number of pixels: a font size in `css::MPX`ths of

@@ -1747,6 +1747,18 @@ react.dev だけ撮らんかった一枚が退化しとった。
     同時に `line-height` の長さ指定が比率で継承されとった件も直した
     （`line_height_fixed_mpx`、change.md に記録）。`line-height:40px` の中の
     32px の span が 80px の行になっとった（Chrome 40）。
+    **【続き 2026-09-27】leading の分け方を Chrome と同じにした**（`text_extent_lu`）。
+    ascent / descent をそれぞれ四捨五入した整数 px にして、leading =
+    line-height − (A+D)。**上側に行く半分は px に切り捨て**（Chrome の LayoutNG の
+    「floor() is to make text dump compatible」）、残りが下。前は normal の行の
+    高さ（line gap 込み）と切り上げの descent を使い、整数を 0 に向けて割っとった
+    ので、`line-height:10px` に 22px の字を混ぜた行が 11（Chrome 12）、字の
+    上端が行の上端に張り付いとった（Chrome は 8px はみ出す）。行の上下は
+    1/64px で積み、字の描画位置は「ベースライン − 切り上げ ascent」。
+    検体 `tools/geom/negleading.html`（**`font-family:"DejaVu Sans"` で Linux でも
+    両ブラウザ同じ書体**）が 4/15 → **15/15**、geom 全体 149 → 157/418。
+    leading.html が 13 → 10 に見えるのは、上の serif 行（k）が書体違いで 1px
+    高いぶんを、p が正しく 12 になったことで下の r* が引き継いだだけ。
     結果: `tools/geom` 全体 137 → **145/403**（悪化 0）、leading 10 → 13、
     WPT `split-inline-borders` の画素差 199186 → 41572（通過数は 9/26 のまま）。
     **Linux の書体違いで横は測れとらん。Windows で geom と六枚の画素差を撮り直すこと。**

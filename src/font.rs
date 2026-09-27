@@ -258,6 +258,8 @@ enum GlyphMode {
 #[derive(Debug, Clone, Copy)]
 struct CachedLineMetrics {
     ascent_px: i32,
+    ascent_round_px: i32,
+    descent_round_px: i32,
     /// How far the face reaches below the baseline, as a positive number.
     descent_px: u32,
     /// What `line-height: normal` comes to for this face and size: the font's
@@ -492,6 +494,26 @@ impl FontContext {
         self.line_metrics(font_size_mpx, font_family).content_px.max(1)
     }
 
+    /// The face's ascent and descent rounded to whole pixels, each on its own:
+    /// the two numbers a browser builds a line box from. The line's leading is
+    /// `line-height` minus their sum, and where the baseline falls inside the
+    /// line follows from them. Distinct from [`Self::descent_px`], which is
+    /// rounded up for the room the letters need.
+    pub fn rounded_ascent_descent_px(
+        &mut self,
+        font_size_mpx: u32,
+        font_family: FontFamilyKind,
+    ) -> (i32, i32) {
+        let metrics = self.line_metrics(font_size_mpx, font_family);
+        (metrics.ascent_round_px, metrics.descent_round_px)
+    }
+
+    /// Where the painter puts the baseline below the top it is handed: the
+    /// ascent rounded up, which is how far it hangs the letters down.
+    pub fn painted_ascent_px(&mut self, font_size_mpx: u32, font_family: FontFamilyKind) -> i32 {
+        self.line_metrics(font_size_mpx, font_family).ascent_px
+    }
+
     /// How far below the baseline the face reaches, at this size.
     ///
     /// Half the leading is added on top of it when a line is taller than the
@@ -522,6 +544,8 @@ impl FontContext {
                     .map(|line| CachedLineMetrics {
                         ascent_px: line.ascent.ceil() as i32,
                         descent_px: (-line.descent).ceil().max(0.0) as u32,
+                        ascent_round_px: line.ascent.round() as i32,
+                        descent_round_px: (-line.descent).round().max(0.0) as i32,
                         // Rounded apart and then added, which is what Chrome
                         // does -- for the line advance as well as the content
                         // area. Rounding the sum instead lands on a different
@@ -548,6 +572,12 @@ impl FontContext {
             })
             .unwrap_or(CachedLineMetrics {
                 ascent_px: crate::css::mpx_to_px(font_size_mpx) as i32,
+                // The same 1.15em of letters as below, a fifth of it under the
+                // baseline.
+                ascent_round_px: ((crate::css::mpx_to_f32(font_size_mpx) * 1.15).round()
+                    - (crate::css::mpx_to_f32(font_size_mpx) * 0.21).round())
+                    as i32,
+                descent_round_px: (crate::css::mpx_to_f32(font_size_mpx) * 0.21).round() as i32,
                 descent_px: (crate::css::mpx_to_f32(font_size_mpx) * 0.21).round() as u32,
                 // No face to ask: the ratio a browser lands on for the common
                 // text faces.
