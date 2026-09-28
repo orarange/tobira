@@ -4622,7 +4622,7 @@ mod tests {
                 text: String::new(),
                 style: std::sync::Arc::new(crate::css::ComputedStyle {
                     break_long_words: false,
-                    baseline_shift: 0,
+                    baseline_shift_lu: 0,
                     table_role: crate::css::TableRole::None,
                     flow_root: false,
                     table_cellpadding: None,
@@ -4861,7 +4861,7 @@ mod tests {
                 text: "Hello".to_string(),
                 style: std::sync::Arc::new(crate::css::ComputedStyle {
                     break_long_words: false,
-                    baseline_shift: 0,
+                    baseline_shift_lu: 0,
                     table_role: crate::css::TableRole::None,
                     flow_root: false,
                     table_cellpadding: None,
@@ -5452,7 +5452,7 @@ mod tests {
             text: text.to_string(),
             style: std::sync::Arc::new(crate::css::ComputedStyle {
                 break_long_words: false,
-                baseline_shift: 0,
+                baseline_shift_lu: 0,
                 table_role: crate::css::TableRole::None,
                 flow_root: false,
                 table_cellpadding: None,

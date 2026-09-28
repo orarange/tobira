@@ -690,10 +690,10 @@ pub fn layout_styled_document(
             node_id: node_id as usize,
             x: left,
             y: top,
-            // An element that wrote nothing is zero wide, as a browser
-            // reports it, and cannot be hit.
+            // An element that wrote nothing is zero wide and zero tall, as a
+            // browser reports it, and cannot be hit.
             width: right.saturating_sub(left),
-            height: bottom.saturating_sub(top).max(1),
+            height: bottom.saturating_sub(top),
             cursor_kind,
             scroll_width: 0,
             scroll_height: 0,
@@ -5282,6 +5282,21 @@ fn layout_mixed_children(
                     )
             })
         {
+            // The elements in it still exist, and a page can ask where they
+            // are: an empty `<span>` between the newlines of a block answers
+            // with a zero-sized box where the content would begin, not with
+            // nothing at 0,0.
+            for fragment in inline_fragments.iter() {
+                if let InlineFragment::BoxStart(node_id) = fragment {
+                    context.inline_rects.entry(*node_id).or_insert((
+                        x,
+                        *cursor_y,
+                        x,
+                        *cursor_y,
+                        CursorKind::Auto,
+                    ));
+                }
+            }
             inline_fragments.clear();
             return;
         }
@@ -6768,7 +6783,7 @@ fn apply_inline_marks(
     markers: &[(usize, usize, u32, bool)],
     span_index: usize,
     span: Option<&LineSpan>,
-    cursor_x: u32,
+    cursor_x_lu: i64,
     line_top: u32,
     strut_height: u32,
     fonts: &mut FontContext,
@@ -6779,13 +6794,15 @@ fn apply_inline_marks(
         if *at != span_index {
             continue;
         }
-        // A mark inside a run stands where the text before it ends.
-        let cursor_x = match span {
+        // A mark inside a run stands where the text before it ends, measured
+        // exactly and rounded once.
+        let mark_lu = match span {
             Some(span) if *offset > 0 && *offset <= span.text.len() => {
-                cursor_x.saturating_add(text_width(&span.style, &span.text[..*offset], fonts))
+                cursor_x_lu + text_width_lu(&span.style, &span.text[..*offset], fonts)
             }
-            _ => cursor_x,
+            _ => cursor_x_lu,
         };
+        let cursor_x = ((mark_lu + LU_PER_PX / 2).div_euclid(LU_PER_PX)).max(0) as u32;
         if *open {
             // Opened, but nothing in it yet: the vertical extent is left
             // empty (top above bottom) so that the first run inside sets it.
@@ -6923,7 +6940,7 @@ fn emit_line_impl(
         // A raised or lowered run is that much further from the baseline, so
         // the line has to make room for it: a superscript on the first line of
         // a paragraph must not be cut off by the box above.
-        let shift = i64::from(span.style.baseline_shift) * px;
+        let shift = i64::from(span.style.baseline_shift_lu);
         above = above.max(span_above - shift);
         below = below.max(span_below + shift);
     }
@@ -6932,10 +6949,13 @@ fn emit_line_impl(
         .max(px)
         .max(i64::from(min_line_height) * px);
     let line_height = ((line_height_lu + px / 2).div_euclid(px)).max(1) as u32;
-    // Where the baseline stands below the top of the line -- a whole number
-    // of pixels, since the leading above it is floored to one. It can sit
-    // above the top only if the whole line is overhang.
-    let baseline_signed = above.div_euclid(px) as i32;
+    // Where the baseline stands below the top of the line. A whole number of
+    // pixels for plain text, since the leading above it is floored to one; a
+    // raised run can make it a fraction (6.328125px for a superscript at
+    // 16px), which is kept for placing the runs and rounded for the rest. It
+    // can sit above the top only if the whole line is overhang.
+    let baseline_lu = above;
+    let baseline_signed = (above + px / 2).div_euclid(px) as i32;
     let baseline = baseline_signed.max(0) as u32;
     // The height an inline element falls back to when its runs have not been
     // walked yet, or when it wrote nothing at all: its CONTENT area, not the
@@ -6946,8 +6966,16 @@ fn emit_line_impl(
     let strut_content = text_content_height(container_style, fonts);
     // The inline elements whose runs are being walked right now.
     let mut open_inlines: Vec<u32> = Vec::new();
+    // Where the pen really is, in 64ths of a pixel. Each run is placed where
+    // this rounds to, and the pen moves on by the run's exact width: a word
+    // and the space after it are 37.35 and 4.45px in 16px Arial, and adding
+    // them rounded put the next word at 41 where Chrome puts it at 42.
+    let mut cursor_x_lu = i64::from(cursor_x) * px;
 
     for (span_index, span) in line.spans.iter().enumerate() {
+        cursor_x = ((cursor_x_lu + px / 2).div_euclid(px)).max(0) as u32;
+        let span_width_lu = span_exact_width_lu(span, fonts);
+        let span_right = ((cursor_x_lu + span_width_lu + px / 2).div_euclid(px)).max(0) as u32;
         // An inline element's box grows to hold wherever its runs land. The
         // opening mark fixes its left edge, the closing one its right; the
         // height comes from the runs between them, not from the line, so a
@@ -6956,7 +6984,7 @@ fn emit_line_impl(
             &line.markers,
             span_index,
             Some(span),
-            cursor_x,
+            cursor_x_lu,
             *cursor_y,
             strut_content,
             fonts,
@@ -6986,11 +7014,17 @@ fn emit_line_impl(
                     .rounded_ascent_descent_px(span.style.font_size_mpx, span.style.font_family)
                     .0
             };
-            let top = (i64::from(*cursor_y) + i64::from(baseline_signed) - i64::from(run_above)
-                + i64::from(span.style.baseline_shift))
-            .max(0) as u32;
+            // From where the line really starts, part-pixel included: after a
+            // 22.33px line with a superscript in it, the next line's
+            // subscript lands half a pixel lower than the rounded top says.
+            let top_lu = i64::from(*cursor_y) * px
+                + i64::from(context.y_frac_lu)
+                + baseline_lu
+                - i64::from(run_above) * px
+                + i64::from(span.style.baseline_shift_lu);
+            let top = (top_lu + px / 2).div_euclid(px).max(0) as u32;
             let bottom = top.saturating_add(run_height);
-            let right = cursor_x.saturating_add(span.width);
+            let right = span_right;
             for node_id in &open_inlines {
                 if let Some(entry) = context.inline_rects.get_mut(node_id) {
                     entry.1 = entry.1.min(top);
@@ -7029,7 +7063,7 @@ fn emit_line_impl(
                 native_chrome,
             });
 
-            cursor_x = cursor_x.saturating_add(span.width);
+            cursor_x_lu += span_width_lu;
             continue;
         }
 
@@ -7072,7 +7106,7 @@ fn emit_line_impl(
                 hitbox.y = hitbox.y.saturating_add(box_y);
                 context.element_hitboxes.push(hitbox);
             }
-            cursor_x = cursor_x.saturating_add(span.width);
+            cursor_x_lu += span_width_lu;
             continue;
         }
 
@@ -7141,7 +7175,7 @@ fn emit_line_impl(
                 }
             }
 
-            cursor_x = cursor_x.saturating_add(span.width);
+            cursor_x_lu += span_width_lu;
             continue;
         }
 
@@ -7174,12 +7208,15 @@ fn emit_line_impl(
         };
         context.commands.push(DrawCommand::Text(TextCommand {
             x: cursor_x,
-            y: cursor_y.saturating_add_signed(span.style.baseline_shift),
+            y: *cursor_y,
             width: span.width,
             text: display_text,
             font_size_mpx: span.style.font_size_mpx,
             line_height_px: line_height,
-            glyph_dy: baseline_signed
+            // The run's own baseline -- the line's, moved by any lift -- less
+            // the depth the painter hangs its letters from.
+            glyph_dy: (baseline_lu + i64::from(span.style.baseline_shift_lu) + px / 2)
+                .div_euclid(px) as i32
                 - fonts.painted_ascent_px(span.style.font_size_mpx, span.style.font_family),
             font_family: span.style.font_family,
             color: apply_opacity(span.style.color, context.background_color, span_opacity),
@@ -7203,14 +7240,14 @@ fn emit_line_impl(
             }
         }
 
-        cursor_x = cursor_x.saturating_add(span.width);
+        cursor_x_lu += span_width_lu;
     }
     // Marks that close after the last run on the line.
     apply_inline_marks(
         &line.markers,
         line.spans.len(),
         None,
-        cursor_x,
+        cursor_x_lu,
         *cursor_y,
         strut_content,
         fonts,
@@ -7397,6 +7434,25 @@ fn text_line_height(style: &ComputedStyle, fonts: &mut FontContext) -> u32 {
     } else {
         fonts.line_height_px(style.font_size_mpx, style.font_family)
     }
+}
+
+/// A run's advance in 64ths of a pixel. Text is measured exactly, letters and
+/// letter-spacing, from what it says -- not from `span.width`, which is the
+/// sum of its words each rounded as the line was filled (37 + 4 + 48 for
+/// "inline nested", which is 89.84 laid end to end). Boxes, images and
+/// controls step by their width, which is whole pixels already.
+fn span_exact_width_lu(span: &LineSpan, fonts: &mut FontContext) -> i64 {
+    if span.control.is_some() || span.image.is_some() || span.atomic.is_some() {
+        return i64::from(span.width) * LU_PER_PX;
+    }
+    text_width_lu(&span.style, &span.text, fonts)
+}
+
+/// [`text_width`] in 64ths of a pixel, unrounded.
+fn text_width_lu(style: &ComputedStyle, text: &str, fonts: &mut FontContext) -> i64 {
+    let letters = fonts.text_width_lu(text, style.font_size_mpx, style.font_family);
+    let spacing = i64::from(style.letter_spacing) * text.chars().count() as i64 * LU_PER_PX;
+    (letters + spacing).max(0)
 }
 
 fn text_width(style: &ComputedStyle, text: &str, fonts: &mut FontContext) -> u32 {
@@ -13229,6 +13285,43 @@ mod tests {
             l.texts().into_iter().any(|text| text.x >= 100),
             "the line beside the float should start past it"
         );
+    }
+
+    #[test]
+    fn superscripts_and_subscripts_open_the_line_as_chrome_does() {
+        // Checked against Chrome (`tools/geom/sup.html`): a superscript lifted
+        // a third of the 16px and a pixel makes its line 22.33px, a subscript
+        // dropped a fifth and a pixel makes it 21.19. The lift was 33% in
+        // whole pixels and the drop half of that, for 21 and 19.
+        let l = probe_layout(
+            r#"<html><body style="font:16px Arial">
+                <div style="background:#aa0001">x<sup>2</sup>y</div>
+                <div style="background:#aa0002">x<sub>2</sub>y</div>
+                <div style="background:#aa0003">x<span style="vertical-align:super">2</span>y</div>
+            </body></html>"#,
+            800,
+        );
+        assert_eq!(probe_rect(&l, 0xAA0002).expect("sub line").y, 22);
+        assert_eq!(probe_rect(&l, 0xAA0003).expect("super line").y, 44);
+    }
+
+    #[test]
+    fn runs_on_a_line_are_placed_by_their_exact_widths() {
+        // "inline " is 41.81px of 16px Arial; Chrome puts the next run at
+        // 41.81, which a page reads as 42. Adding the words rounded one by
+        // one (37 + 4) put it at 41.
+        let l = probe_layout(
+            r#"<html><body style="font:16px Arial">
+                <div>inline <span data-tobira-node-id="990">nested</span></div>
+            </body></html>"#,
+            800,
+        );
+        let hitbox = l
+            .element_hitboxes
+            .iter()
+            .find(|hitbox| hitbox.node_id == 990)
+            .expect("the span's box");
+        assert_eq!((hitbox.x, hitbox.width), (42, 48));
     }
 
     #[test]

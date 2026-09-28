@@ -714,7 +714,28 @@ receiver の own property 数 1 / 20 / 100 / 400 で回すと、O(幅) の処理
    `draw_text`）は百分の一 px を取る。**描画と測定が同じ値を使うこと**が
    条件（違うと字が箱からはみ出す）。
 
-3. **インライン矩形の残り（g2 / g4 / sup）** — `g4` が 11/14、`g2` が 14/22、
+3. **【ほぼ済・2026-09-28】インライン矩形の残り（g2 / g4 / sup）** —
+   sup **2/10 → 10/10**、g4 **11 → 13/14**。走査順の作り替えは要らんかった。
+   外れの正体は三つで、どれも「丸めてから足す」か「式が Chrome と違う」:
+   ① `vertical-align: super/sub` の量。Chrome は**親の** font-size の
+   1/3 + 1px（上）/ 1/5 + 1px（下）を 1/64px で持つ（16px で 6.328125 /
+   4.1875）。tobira は 33% を整数 px、下はその半分やった。
+   `ComputedStyle::baseline_shift_lu` に改名して 1/64px にした。`<sup>` の字は
+   `smaller` = 親 ÷ 1.2（83% やった。`smaller` / `larger` キーワードも ±2px
+   やったのを ÷1.2 / ×1.2 に）。検体 `tools/geom/supshift.html`。
+   ② 行の中の x を run ごとに丸めて足しとった。「inline 」は 37.35 + 4.45 =
+   41.8 で Chrome は 42、tobira は 37 + 4 = 41。`emit_line` の中だけ x を
+   1/64px で積む（`span_exact_width_lu`、run の途中の印も正確な幅で）。
+   **行の折り返しの判定は整数の幅のまま**（触っとらん）。検体 `inlx.html`。
+   ③ 空白と空の inline だけの塊は行を作らずに捨てとって、中の要素の箱も
+   消えとった（`getBoundingClientRect` が 0,0）。捨てる前に 0x0 で登録。
+   **残り（別件）**: g2 は表（`border-collapse` の枠の半分の配り方）で表以下が
+   全部 +1。g4 の `lnk` と `inlx` の `f` は**太字を普通の字幅で測っとる**
+   （font.rs が意図してそうしとる。Chrome は太字の advance）。それと
+   **空白の持ち主**: `inline <span>nested</span>` の空白が span 側の run に
+   入る（背景が空白まで塗られ、背景の矩形は 37 から）。Chrome は空白を
+   それが書かれた要素に置く。
+   旧記述: `g4` が 11/14、`g2` が 14/22、
    `sup` が 2/10。**2026-09-10 に三度直そうとして三度悪化させた**
    （10/14 → 6〜8/14）。原因は `emit_line_impl` で閉じ印が自分の run より
    先に処理される構造で、その順序に他の計算がぶら下がっとる。
@@ -863,6 +884,14 @@ python tools/geom/cmp.py g4.html
 ```
 
 ## Session Log
+
+### 2026-09-28 - Claude (Linux の書体代替 + インライン矩形)
+
+- Linux で `Arial` 等を Liberation に引くようにしたら geom が 157 → 293/418。
+  この環境でも Windows と同じ点が出るようになった（g2/g4/sup が記録どおり）。
+- インライン矩形: sup 10/10、g4 13/14、geom 全体 294 → 324/460。詳細は
+  「次の一手」3 番。テスト Linux で 1206 通過 / 4 落ち（既定 sans を Arial と
+  仮定した Windows 向けのもの）。
 
 ### 2026-09-26 - Claude (行の高さ: 端数の繰り越し・字をベースラインに・line-height の継承)
 

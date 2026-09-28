@@ -550,6 +550,25 @@ impl FontContext {
         total.round() as u32
     }
 
+    /// The same width in 64ths of a pixel, unrounded to whole ones: what a
+    /// line adds up run by run so that it rounds once, where it places each
+    /// run, instead of once per run.
+    pub fn text_width_lu(
+        &mut self,
+        text: &str,
+        font_size_mpx: u32,
+        font_family: FontFamilyKind,
+    ) -> i64 {
+        let total: f32 = text
+            .chars()
+            .map(|character| {
+                self.cached_glyph(character, font_size_mpx, font_family, false)
+                    .advance
+            })
+            .sum();
+        (total * 64.0).round() as i64
+    }
+
     /// `line-height: normal`, which is the face's own recommended line
     /// spacing -- ascent plus descent plus line gap.
     ///

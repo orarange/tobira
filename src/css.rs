@@ -1552,11 +1552,15 @@ pub struct ComputedStyle {
     /// `word-break: break-all` each turn it on, and pages that hold long URLs
     /// or identifiers say so.
     pub break_long_words: bool,
-    /// How far the text is lifted off the line's baseline, in pixels.
+    /// How far the text is lifted off the line's baseline, in 64ths of a
+    /// pixel -- Chrome's `LayoutUnit`.
     ///
-    /// Negative is up. `<sup>` and `<sub>` are the only things that set it, and
-    /// they are why a footnote marker or the 2 in H2O sits where it does.
-    pub baseline_shift: i32,
+    /// Negative is up. `<sup>` / `<sub>` and `vertical-align: super / sub` set
+    /// it, and they are why a footnote marker or the 2 in H2O sits where it
+    /// does. Kept fractional because Chrome's lift is: a third of the parent's
+    /// size plus a pixel, 6.328125px at 16px. Held in whole pixels it lost the
+    /// third of a pixel on every superscripted line.
+    pub baseline_shift_lu: i32,
     pub text_overflow_ellipsis: bool,
     pub text_shadow: Option<TextShadow>,
     pub background_gradient: Option<LinearGradient>,
@@ -1825,7 +1829,7 @@ impl ComputedStyle {
             break_long_words: parent.map(|s| s.break_long_words).unwrap_or(false),
             // Not inherited: a `<sup>` inside a `<sup>` is raised once more
             // from where the outer one put it, not twice from the baseline.
-            baseline_shift: 0,
+            baseline_shift_lu: 0,
             text_overflow_ellipsis: false,
             text_shadow: None,
             background_gradient: None,
@@ -1993,14 +1997,16 @@ impl ComputedStyle {
             "strong" | "b" => {
                 style.font_weight = true;
             }
-            // Smaller type, lifted off the baseline. The size is the browser's
-            // own `smaller`, and the lift is a third of the surrounding type --
-            // which is what puts a footnote marker beside the word rather than
-            // in the middle of it.
+            // Smaller type, lifted off the baseline: the UA sheet's
+            // `font-size: smaller; vertical-align: super` (or `sub`). The lift
+            // is measured from the surrounding type, not the smaller one.
             "sup" | "sub" => {
-                style.font_size_mpx = (parent_font_size_mpx * 83 / 100).max(1);
-                let shift = (mpx_to_px(parent_font_size_mpx) * 33 / 100) as i32;
-                style.baseline_shift = if tag_name == "sup" { -shift } else { shift / 2 };
+                style.font_size_mpx = smaller_font_size(parent_font_size_mpx);
+                style.baseline_shift_lu = if tag_name == "sup" {
+                    super_shift_lu(parent_font_size_mpx)
+                } else {
+                    sub_shift_lu(parent_font_size_mpx)
+                };
             }
             "small" => {
                 style.font_size_mpx = parent_font_size_mpx
@@ -5406,7 +5412,7 @@ fn apply_declaration(style: &mut ComputedStyle, declaration: &Declaration, paren
         }
         "vertical-align" => {
             // `super` and `sub` are not a box alignment at all -- they shift the
-            // box off the line's baseline, which is what `baseline_shift`
+            // box off the line's baseline, which is what `baseline_shift_lu`
             // already does for the `<sup>` and `<sub>` tags. Only the four
             // alignment keywords were understood, so `vertical-align: super`
             // was dropped and the box sat flat on the baseline: on
@@ -5418,12 +5424,11 @@ fn apply_declaration(style: &mut ComputedStyle, declaration: &Declaration, paren
             // `sup { vertical-align: baseline }` puts a footnote marker back on
             // the line the way a page that writes it expects.
             let keyword = value.trim().to_ascii_lowercase();
-            let em_third = (mpx_to_px(parent_font_size_mpx) * 33 / 100) as i32;
             match keyword.as_str() {
-                "super" => style.baseline_shift = -em_third,
-                "sub" => style.baseline_shift = em_third / 2,
+                "super" => style.baseline_shift_lu = super_shift_lu(parent_font_size_mpx),
+                "sub" => style.baseline_shift_lu = sub_shift_lu(parent_font_size_mpx),
                 "baseline" => {
-                    style.baseline_shift = 0;
+                    style.baseline_shift_lu = 0;
                     style.vertical_align = VerticalAlign::Baseline;
                 }
                 _ => {
@@ -8471,10 +8476,32 @@ fn parse_font_size(input: &str, parent_font_size_mpx: u32) -> Option<u32> {
         "large" => Some(20 * MPX),
         "x-large" => Some(24 * MPX),
         "xx-large" => Some(32 * MPX),
-        "smaller" => Some(parent_font_size_mpx.saturating_sub(2 * MPX).max(8 * MPX)),
-        "larger" => Some(parent_font_size_mpx.saturating_add(2 * MPX)),
+        "smaller" => Some(smaller_font_size(parent_font_size_mpx)),
+        "larger" => Some((u64::from(parent_font_size_mpx) * 12 / 10).min(u64::from(u32::MAX)) as u32),
         _ => parse_length_mpx(&value, parent_font_size_mpx),
     }
+}
+
+/// `font-size: smaller` -- the parent's size over 1.2, as Chrome computes it.
+/// It was two pixels less, so a `<sup>` in 24px type came out 22px where
+/// Chrome makes it 20 (checked on `tools/geom/supshift.html`).
+fn smaller_font_size(parent_font_size_mpx: u32) -> u32 {
+    (u64::from(parent_font_size_mpx) * 10 / 12).max(1) as u32
+}
+
+/// How far `vertical-align: super` lifts a box: a third of the parent's font
+/// size and a pixel, in 64ths of a pixel with the third floored to one --
+/// Chrome's arithmetic, which puts a superscript in 16px type 6.328125px up.
+fn super_shift_lu(parent_font_size_mpx: u32) -> i32 {
+    let parent_lu = i64::from(parent_font_size_mpx) * 64 / i64::from(MPX);
+    -((parent_lu / 3 + 64) as i32)
+}
+
+/// How far `vertical-align: sub` drops a box: a fifth of the parent's font
+/// size and a pixel, 4.1875px in 16px type.
+fn sub_shift_lu(parent_font_size_mpx: u32) -> i32 {
+    let parent_lu = i64::from(parent_font_size_mpx) * 64 / i64::from(MPX);
+    (parent_lu / 5 + 64) as i32
 }
 
 fn parse_legacy_font_size(input: &str, parent_font_size_mpx: u32) -> Option<u32> {
@@ -10029,13 +10056,13 @@ mod tests {
         );
         let sup = find_first_element(&styled, "sup").expect("the sup should exist");
         let sub = find_first_element(&styled, "sub").expect("the sub should exist");
-        assert_eq!(
-            sup.style.font_size_mpx,
-            132_800,
-            "83% of 16px, kept to the fraction rather than rounded to 13"
-        );
-        assert!(sup.style.baseline_shift < 0, "a superscript is lifted");
-        assert!(sub.style.baseline_shift > 0, "a subscript is dropped");
+        // Chrome's `smaller`: 16px over 1.2, kept to the fraction.
+        assert_eq!(sup.style.font_size_mpx, 133_333);
+        // Lifted a third of the surrounding 16px and a pixel (6.328125px),
+        // dropped a fifth and a pixel (4.1875px), in 64ths of a pixel --
+        // checked against Chrome on `tools/geom/supshift.html`.
+        assert_eq!(sup.style.baseline_shift_lu, -405);
+        assert_eq!(sub.style.baseline_shift_lu, 268);
     }
 
     /// `vertical-align: super` and `sub` shift a box off the baseline; they are
@@ -10072,12 +10099,12 @@ mod tests {
         };
         let up = by_id("up");
         let down = by_id("down");
-        assert!(up.style.baseline_shift < 0, "super lifts: {up:?}");
-        assert!(down.style.baseline_shift > 0, "sub drops: {down:?}");
+        assert!(up.style.baseline_shift_lu < 0, "super lifts: {up:?}");
+        assert!(down.style.baseline_shift_lu > 0, "sub drops: {down:?}");
         assert_eq!(up.style.font_size_mpx, 16 * MPX, "the keyword leaves the size alone");
         assert_eq!(down.style.font_size_mpx, 16 * MPX);
         // `baseline` is the initial value, so it has to undo the tag's lift.
-        assert_eq!(by_id("flat").style.baseline_shift, 0);
+        assert_eq!(by_id("flat").style.baseline_shift_lu, 0);
     }
 
     /// `hidden` is how a page hides something without writing any CSS for it,

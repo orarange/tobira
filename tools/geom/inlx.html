@@ -1,0 +1,8 @@
+<html><head><style>body{margin:0;font:16px Arial;width:800px}</style></head><body>
+<div><span id="a">inline <span id="b">nested</span></span></div>
+<div>inline <span id="c">nested</span></div>
+<div><span id="d">inline</span> <span id="e">nested</span></div>
+<div>iiii <b id="f">bold</b> lllll <i id="g">ital</i></div>
+<pre id="out"></pre><script>
+document.getElementById('out').textContent='a b c d e f g'.split(' ').map(function(id){var r=document.getElementById(id).getBoundingClientRect();return id+' '+r.x.toFixed(2)+' w='+r.width.toFixed(2)}).join('\n');
+</script></body></html>
