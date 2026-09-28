@@ -173,13 +173,88 @@ pub fn family_is_installed(lowercase_name: &str) -> bool {
     answer
 }
 
+/// Families a page names, and the metric-compatible faces a Linux machine has
+/// for them -- the substitutions fontconfig makes, which is what Chrome draws
+/// with there. Without them every `font-family: Arial` on Linux fell to the
+/// generic sans (DejaVu Sans, about 15% wider), so no probe that names Arial
+/// could be compared with Chrome on Linux at all.
+const UNIX_FAMILY_FILES: &[(&str, &str, &str)] = &[
+    (
+        "arial",
+        "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
+        "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
+    ),
+    (
+        "helvetica",
+        "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
+        "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
+    ),
+    (
+        "liberation sans",
+        "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
+        "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
+    ),
+    (
+        "times new roman",
+        "/usr/share/fonts/truetype/liberation/LiberationSerif-Regular.ttf",
+        "/usr/share/fonts/truetype/liberation/LiberationSerif-Bold.ttf",
+    ),
+    (
+        "times",
+        "/usr/share/fonts/truetype/liberation/LiberationSerif-Regular.ttf",
+        "/usr/share/fonts/truetype/liberation/LiberationSerif-Bold.ttf",
+    ),
+    (
+        "liberation serif",
+        "/usr/share/fonts/truetype/liberation/LiberationSerif-Regular.ttf",
+        "/usr/share/fonts/truetype/liberation/LiberationSerif-Bold.ttf",
+    ),
+    (
+        "courier new",
+        "/usr/share/fonts/truetype/liberation/LiberationMono-Regular.ttf",
+        "/usr/share/fonts/truetype/liberation/LiberationMono-Bold.ttf",
+    ),
+    (
+        "courier",
+        "/usr/share/fonts/truetype/liberation/LiberationMono-Regular.ttf",
+        "/usr/share/fonts/truetype/liberation/LiberationMono-Bold.ttf",
+    ),
+    (
+        "liberation mono",
+        "/usr/share/fonts/truetype/liberation/LiberationMono-Regular.ttf",
+        "/usr/share/fonts/truetype/liberation/LiberationMono-Bold.ttf",
+    ),
+    (
+        "dejavu sans",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+    ),
+    (
+        "dejavu serif",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSerif.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSerif-Bold.ttf",
+    ),
+    (
+        "dejavu sans mono",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSansMono-Bold.ttf",
+    ),
+];
+
 /// The path to a named family's file, if it is installed.
 fn named_family_file(lowercase_name: &str, bold: bool) -> Option<PathBuf> {
-    let (_, regular, bold_file) = WINDOWS_FAMILY_FILES
+    if cfg!(windows) {
+        let (_, regular, bold_file) = WINDOWS_FAMILY_FILES
+            .iter()
+            .find(|(name, _, _)| *name == lowercase_name)?;
+        let file = if bold { bold_file } else { regular };
+        let path = windows_font_dir()?.join(file);
+        return path.is_file().then_some(path);
+    }
+    let (_, regular, bold_file) = UNIX_FAMILY_FILES
         .iter()
         .find(|(name, _, _)| *name == lowercase_name)?;
-    let file = if bold { bold_file } else { regular };
-    let path = windows_font_dir()?.join(file);
+    let path = PathBuf::from(if bold { bold_file } else { regular });
     path.is_file().then_some(path)
 }
 

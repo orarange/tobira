@@ -113,9 +113,13 @@ tick を一度も回しとらんかった。frame ごとに relayout して geom
 Chrome との突き合わせは `tools/geom/`（README 参照）。参照ブラウザは **Chrome ヘッドレス**。
 Linux のクラウド環境でも回る（2026-09-26）:
 `CHROME_PATH=/opt/pw-browsers/chromium-1194/chrome-linux/chrome TOBIRA_PATH=$PWD/target/release/tobira python3 tools/geom/cmp.py drift.html`。
-**ただし横の数字は使えん**: tobira は名前指定の family（`arial` 等）を
-Windows でしか引かんので DejaVu Sans に落ち、Chrome とは別の書体になる
-（fsize 0/12・units 0/9 は全部これ）。縦（行の高さ・drift）は比べられる。
+**2026-09-28 から横も比べられる**: Linux でも名前指定の family を
+fontconfig と同じ代替で引くようにした（`font.rs` の `UNIX_FAMILY_FILES`:
+Arial/Helvetica → Liberation Sans、Times → Liberation Serif、Courier →
+Liberation Mono）。**geom 全体が 157 → 293/418 に上がり、g2 14/22・g4 11/14・
+sup 2/10 は Windows の記録と同じ点**。フォント未指定（総称 sans）は Linux の
+Chrome も DejaVu Sans なのでそのまま。テストは Linux で 1204 通過 / 4 落ち
+（Windows の Arial を既定 sans と仮定したテスト 4 本）。
 Edge は 2026-08-27 の更新以降 `--dump-dom` が無出力になったので使えん。
 
 **数値だけ見るな。** 表が指定幅を無視する件も `<center>` が表を中央寄せせん件も、
