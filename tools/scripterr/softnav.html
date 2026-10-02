@@ -1,0 +1,12 @@
+<!doctype html>
+<html><head><title>softnav</title></head>
+<body>
+<p id="p">soft navigation stickiness</p>
+<script>
+// A router records its URL once, the way Next.js does on hydration.
+// After that nothing touches the DOM: the interval only counts.
+history.replaceState({ n: 0 }, '', location.href);
+var n = 0;
+setInterval(function () { n++; }, 16);
+</script>
+</body></html>

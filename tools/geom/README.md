@@ -13,9 +13,11 @@ python tools/geom/cmp.py g4.html
 | page | what it probes | last score |
 |------|----------------|-----------:|
 | `g1.html` | box model, flex, grid, position | 28/29 |
-| `g2.html` | inline formatting, line breaking | 14/22 |
+| `g2.html` | inline formatting, line breaking | 22/22 |
 | `g3.html` | inline-block baselines | 6/7 |
-| `g4.html` | inline element hitboxes | 11/14 |
+| `g4.html` | inline element hitboxes | 14/14 |
+| `wsown.html` | which element a collapsible space belongs to | 8/9 |
+| `collapse.html` | `border-collapse: collapse` tables | 9/12 |
 | `g5.html` | modern CSS (custom properties, logical props, clamp) | 23/26 |
 | `g6.html` | font-family name resolution | 10/12 |
 | `g6b.html` | which face each generic family resolves to | 17/32 |

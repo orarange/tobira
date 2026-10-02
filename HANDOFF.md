@@ -111,6 +111,15 @@ tick を一度も回しとらんかった。frame ごとに relayout して geom
 `TOBIRA_H5_FILE`、`TOBIRA_INCREMENTAL_RESTYLE`。
 
 Chrome との突き合わせは `tools/geom/`（README 参照）。参照ブラウザは **Chrome ヘッドレス**。
+Linux のクラウド環境でも回る（2026-09-26）:
+`CHROME_PATH=/opt/pw-browsers/chromium-1194/chrome-linux/chrome TOBIRA_PATH=$PWD/target/release/tobira python3 tools/geom/cmp.py drift.html`。
+**2026-09-28 から横も比べられる**: Linux でも名前指定の family を
+fontconfig と同じ代替で引くようにした（`font.rs` の `UNIX_FAMILY_FILES`:
+Arial/Helvetica → Liberation Sans、Times → Liberation Serif、Courier →
+Liberation Mono）。**geom 全体が 157 → 293/418 に上がり、g2 14/22・g4 11/14・
+sup 2/10 は Windows の記録と同じ点**。フォント未指定（総称 sans）は Linux の
+Chrome も DejaVu Sans なのでそのまま。テストは Linux で 1204 通過 / 4 落ち
+（Windows の Arial を既定 sans と仮定したテスト 4 本）。
 Edge は 2026-08-27 の更新以降 `--dump-dom` が無出力になったので使えん。
 
 **数値だけ見るな。** 表が指定幅を無視する件も `<center>` が表を中央寄せせん件も、
@@ -374,11 +383,40 @@ receiver の own property 数 1 / 20 / 100 / 400 で回すと、O(幅) の処理
     `!snapshot.structural_changes.is_empty()` なので、**子リストが変わらん
     変更は全部、全体再構築に落ちる**。React がやっとるのは属性とテキストの
     書き換えで、`record_childlist_mutation` には載らん。
+    （**↑ 後半は外れ**。属性とテキストは `SetAttribute` / `SetText` で
+    元から記録されとる。下の【訂正・解決】参照）
     `tick()` の方は `html != self.html_source` で「変わった」と判定するので、
     **「変わったが増分にできん」の組み合わせが毎フレーム成立する**。
     → 268KB を parse し直して styled tree を作り直すのが **1.9 秒 × 33 回**。
-    **次の的はここ**: 属性・テキストの変更も増分で当てられるようにする
-    （engine 側に childlist 以外の mutation の記録が要る）。
+    ~~**次の的はここ**: 属性・テキストの変更も増分で当てられるようにする
+    （engine 側に childlist 以外の mutation の記録が要る）。~~
+    **↑ この段落の見立ては外れ（2026-09-26）。直下の【訂正・解決】を読むこと。**
+    - **【訂正・解決】`changes: 0` は「属性とテキストが記録されとらん」
+      やなかった**（2026-09-26）。`record_attribute_mutation` /
+      `record_characterdata_mutation` は `SetAttribute` / `SetText` を元から
+      積んどる。しかも tick は `snapshot_lazy` で、変更が 0 なら html は
+      **空**で返る。**変更 0 で 268KB の html が来とる**のは、変更以外の
+      理由で no-op が崩れとる形やった。
+      → **犯人は soft navigation の印が消えんこと**。`soft_navigation` は
+      `history.replaceState` で立って**二度と下りん**（snapshot が
+      clone で読むだけ）。Next.js は hydration で `replaceState` を一回
+      呼ぶので、以降**timer が走ったフレームは全部「移動した」扱い**:
+      engine は全文を直列化し、browser は soft nav なので増分経路を
+      最初から外して全体再構築、`tick()` も changed=true を返して
+      layout と geometry の feed まで回る。react.dev の 34/125 は
+      `setInterval(fn, 60)` が走るフレームの数とちょうど合う。
+      **DOM は一度も変わっとらんかった。**
+      検体 `tools/scripterr/softnav.html`（最小）と
+      `softnav_heavy.html`（1800 要素 + 60ms interval）。heavy で
+      **33 回の全体再構築・3.5 秒 → 0 回・0.31 秒**。前は quiet 判定も
+      効かず予算 125 フレームを使い切っとった。今は 8 フレームで抜ける。
+      直し方: ① `take_soft_navigation_target` で**一回渡したら下ろす**
+      ② browser 側で「DOM 不変 + soft nav だけ」なら**URL を差し替えて
+      終わり**（資源は旧 URL で解決済みのまま。ブラウザと同じ）。
+      **react.dev の実測はまだ**（この回の環境から react.dev に出られん
+      かった）。Windows で `TOBIRA_TIME_LAYOUT=1` を回して、
+      `not eligible` の行と CPU 秒を数えること。**属性の増分化は、
+      それでもまだ全体再構築が残っとったら考える**（今は根拠が無い）。
     - **容疑者①「stylesheet を毎回パースし直しとる」は外れ**（同日実測）。
       `collect_stylesheet` は確かに再構築のたびに全部パースし直しとる
       （`STYLESHEET_MEMO` はテキストだけの memo）が、**6 ms / 回、
@@ -447,6 +485,37 @@ receiver の own property 数 1 / 20 / 100 / 400 で回すと、O(幅) の処理
           ③ 展開したフォントの上限と追い出し。
           **時間とメモリの両方で効く**（0d942a2 までの八人は全員無罪、
           九人目で当たった）。
+        - **【解決】①②③のどれでもなく、`fontdue` を外した**（2026-09-26）。
+          「40 倍の展開」の正体は `fontdue::Font::from_bytes` が**開いた瞬間に
+          全グリフの輪郭を幾何に起こす**こと。字数に関係なく、フォントの
+          グリフ数で決まる（段の形になるのはこのせい）。単体で測った:
+          ```
+                           ファイル  グリフ数   fontdue            ttf-parser
+          ipag.ttf           6 MB    12,728   +58 MiB  0.11 s    +0 MiB  20 µs
+          wqy-zenhei.ttc    16 MB    44,960  +209 MiB  0.72 s    +0 MiB  17 µs
+          DejaVuSans.ttf   0.7 MB     6,253   +19 MiB  0.03 s    +0 MiB  17 µs
+          ```
+          上限・追い出し（③）は「居座る 200 MiB を捨てる」話で、日本語の頁では
+          毎回読み直しになるだけ。**展開せんのが本筋**。
+          → `ab_glyph`（`owned_ttf_parser` の上、輪郭は描くときに読む）に
+          替えた。`font.rs` の `Font` が `fontdue` と同じ三つ
+          （`has_glyph` / `horizontal_line_metrics` / `rasterize`）を出す
+          薄い包みで、描画側は無変更。**字送り・行の三値・グリフの外枠は
+          五書体 × 七サイズで差 0**（手元の比較プログラムで確認）。違うのは
+          アンチエイリアスの縁だけで、墨の総量は 0.2% 以内、画素差は最大
+          64/255。**注意: `ab_glyph` の `pt_to_px_scale` は pt→px（96/72）を
+          掛ける。em で合わせるには `px × height_unscaled / units_per_em`。**
+          これを踏むと全部 1.333 倍になる。
+          tobira 全体（Linux、`wqy-zenhei.ttc` を一時的に sans 候補に足して
+          `--cli`）:
+          ```
+                        修正前              修正後
+          ASCII だけ    50.9 MiB  0.11 s    18.2 MiB  0.03 s
+          日本語 5 字  529.4 MiB  1.05 s    34.6 MiB  0.05 s
+          日本語 800  529.5 MiB  1.04 s    34.7 MiB  0.06 s
+          ```
+          **Windows（YuGothR.ttc）と ja.wikipedia での実測はまだ。**
+          `tools/resource/measure.py` で六枚を撮り直すこと。
       - **属性の量も無罪**（同日、react.dev の保存 HTML で実測）。
         HTML 266KB の **87% が属性**（4176 個、class は平均 68 文字・最長
         515 文字の Tailwind）なので容疑者に挙がったが、剥いでも変わらん:
@@ -624,7 +693,13 @@ receiver の own property 数 1 / 20 / 100 / 400 で回すと、O(幅) の処理
    小さい要素を tag/class/深さ付きで出す。`--dump-styled` は浅いので
    これが一番速い。
 
-2. **`font-size` の端数** — `LengthValue` が u32 なので `10pt`（13.333px）が
+2. **【済・2026-09-20】`font-size` の端数** — 1/10000 px の固定小数
+   （`font_size_mpx`）で解決済み。詳細は Session Log の「font-size を整数 px から
+   1/10000 px の固定小数にした」。**この項は 09-26 まで未着手のまま残っとった
+   （ドリフト）。** 端数の話で残っとるのは**行の高さ**の方
+   （`line_height_from_ratio` の丸めと負の half-leading、`tools/geom/drift.html`
+   で 20 行 7px）。以下は着手前の記述で、記録として残す。
+   旧: `LengthValue` が u32 なので `10pt`（13.333px）が
    13px になる。**縦への影響はほぼ無いと測って分かった**
    （`tools/geom/lineheight2.html` が 7/14 で、行の高さが変わるのは
    七形のうち一形だけ）。効くのは**横**で、`fsize.html` の残り 9 件と
@@ -639,7 +714,54 @@ receiver の own property 数 1 / 20 / 100 / 400 で回すと、O(幅) の処理
    `draw_text`）は百分の一 px を取る。**描画と測定が同じ値を使うこと**が
    条件（違うと字が箱からはみ出す）。
 
-3. **インライン矩形の残り（g2 / g4 / sup）** — `g4` が 11/14、`g2` が 14/22、
+3. **【ほぼ済・2026-09-28】インライン矩形の残り（g2 / g4 / sup）** —
+   sup **2/10 → 10/10**、g4 **11 → 13/14**。走査順の作り替えは要らんかった。
+   外れの正体は三つで、どれも「丸めてから足す」か「式が Chrome と違う」:
+   ① `vertical-align: super/sub` の量。Chrome は**親の** font-size の
+   1/3 + 1px（上）/ 1/5 + 1px（下）を 1/64px で持つ（16px で 6.328125 /
+   4.1875）。tobira は 33% を整数 px、下はその半分やった。
+   `ComputedStyle::baseline_shift_lu` に改名して 1/64px にした。`<sup>` の字は
+   `smaller` = 親 ÷ 1.2（83% やった。`smaller` / `larger` キーワードも ±2px
+   やったのを ÷1.2 / ×1.2 に）。検体 `tools/geom/supshift.html`。
+   ② 行の中の x を run ごとに丸めて足しとった。「inline 」は 37.35 + 4.45 =
+   41.8 で Chrome は 42、tobira は 37 + 4 = 41。`emit_line` の中だけ x を
+   1/64px で積む（`span_exact_width_lu`、run の途中の印も正確な幅で）。
+   **行の折り返しの判定は整数の幅のまま**（触っとらん）。検体 `inlx.html`。
+   ③ 空白と空の inline だけの塊は行を作らずに捨てとって、中の要素の箱も
+   消えとった（`getBoundingClientRect` が 0,0）。捨てる前に 0x0 で登録。
+   **残り（別件）**: ~~g2 は表（`border-collapse` の枠の半分の配り方）で表以下が
+   全部 +1。~~ → **2026-10-02 に直した（g2 22/22）**。`border-collapse` は CSS で
+   読んでもおらんかった。いまは collapse の表で格子の線ごとに太さ（接する
+   セルの枠と、外周なら表の枠のうち一番太いもの）を決め（`CollapsedLines`）、
+   セルにはその線を丸ごと持たせて、隣とは共有する線の太さぶん重ねる。整数 px
+   のままで表の大きさは Chrome と同じになる（1px の 2 行で 47、3px で 53、
+   4px の表の枠で 28）。getBoundingClientRect 用の箱だけ線の真ん中まで削る
+   （`half_box`）。ついでに**セルの枠をそもそも描いとらんかった**のを描くように
+   した（separate も）。残り: 列の幅が整数なので、自動幅の表で 1px ずれる
+   （`tablew` t3 が 292 → 291、`collapse.html` の e/g/h）。前に t3 が合うとったのは
+   内側の線を二重に数えとったのが丸めの分をたまたま埋めとっただけ。直すなら列の幅を
+   1/64px で持つ。separate の表は**既定の border-spacing 2px も表自身の枠も
+   無視しとる**（Chrome の t4 は 36x28、tobira 30x24）し、`<table border=1>` の
+   セルの枠も出ん。どれも別件。~~g4 の `lnk` と `inlx` の `f` は太字を普通の字幅で測っとる~~
+   → **2026-10-02 に直した（g4 14/14）**: 測る側（`glyph_advance_px` /
+   `text_width_px` / `text_width_lu`）に `bold` を渡し、描く側も太字の
+   advance で進める。ついでに**名前指定の書体（Arial 等）の太字が一度も
+   読まれとらんかった**のも直した（`rasterize_glyph` が bold の字体を
+   調べる前に `ensure_family_loaded(.., true)` を呼んどらんかった。Arial の
+   頁の太字は全部、普通の字を横に塗り広げた偽の太字やった）。名前指定の
+   書体に太字が無いときは今も偽の太字で、sans の太字には落ちん。それと
+   ~~空白の持ち主~~ → **2026-10-02 に直した**（`tools/geom/wsown.html`
+   4 → 8/9）。run の終わりの空白は、次に何かが来るまで書くのを待たせる
+   （行末の空白は行に含めんため）。その待たせとる間に入った開き印・閉じ印の
+   後ろに、次の run の style で書いとったのが原因。いまは待たせるときに
+   書いた run の style と、その時点の印の数を `OwedSpace` に覚えて、
+   `push_owed_space` で**その後の印より前に、元の run の style で**書く。
+   `a <span> </span>b` のような空白だけの run は、前に待たせた空白を上書き
+   せん（並んだ空白は最初の一つが残る）。ついでに、**行末で開いて次の行で
+   閉じる要素は次の行から始める**ようにした（`emit_line_impl` が行末の開き印
+   を次の行に持ち越す。前は箱が前の行の右端まで伸びとった）。
+   残る h の 1px は幅の丸め（左右を別々に丸めとる）で、別件。
+   旧記述: `g4` が 11/14、`g2` が 14/22、
    `sup` が 2/10。**2026-09-10 に三度直そうとして三度悪化させた**
    （10/14 → 6〜8/14）。原因は `emit_line_impl` で閉じ印が自分の run より
    先に処理される構造で、その順序に他の計算がぶら下がっとる。
@@ -788,6 +910,68 @@ python tools/geom/cmp.py g4.html
 ```
 
 ## Session Log
+
+### 2026-10-02 - Claude (表の border-collapse)
+
+- `border-collapse` を読み、collapse の表は線を共有して重ねるようにした。セルの
+  枠を描くようにもした。g2 12 → 22/22、新しい検体 `collapse.html` 0 → 9/12、
+  `tablew` は 6 → 5/6（上の「残り」）。geom 全体 333 → 351/481。テスト 1211 通過 /
+  4 落ち（前と同じ 4 本）、html5lib 1213/1229。
+
+### 2026-10-02 - Claude (空白の持ち主)
+
+- 待たせた空白を、書いた run の style で、その後に入った印より前に書くように
+  した。行末で開く要素は次の行に持ち越す。wsown 4 → 8/9、geom 全体
+  329 → 333/469（ほかは変わらず）。g2 の inline-block の背景が手前の空白まで
+  塗られとったのも消えた。テスト 1209 通過 / 4 落ち（前と同じ 4 本）。
+
+### 2026-10-02 - Claude (太字の字幅)
+
+- 太字を太字の advance で測って描くようにした。名前指定の書体の太字が
+  読まれず偽の太字になっとった不具合も一緒に直した。g4 13 → 14/14、
+  geom 全体 324 → 325/460（ほかは一つも変わらん）。検体
+  `tools/geom/boldw.html` を撮って Chrome と横位置が揃うのを確認。
+  テスト 1207 通過 / 4 落ち（前と同じ 4 本）、html5lib 1213/1229。
+
+### 2026-09-28 - Claude (Linux の書体代替 + インライン矩形)
+
+- Linux で `Arial` 等を Liberation に引くようにしたら geom が 157 → 293/418。
+  この環境でも Windows と同じ点が出るようになった（g2/g4/sup が記録どおり）。
+- インライン矩形: sup 10/10、g4 13/14、geom 全体 294 → 324/460。詳細は
+  「次の一手」3 番。テスト Linux で 1206 通過 / 4 落ち（既定 sans を Arial と
+  仮定した Windows 向けのもの）。
+
+### 2026-09-26 - Claude (行の高さ: 端数の繰り越し・字をベースラインに・line-height の継承)
+
+- 行の高さを 1/64px の端数ごと積むようにした（drift 1/6 → 6/6）。その途中で
+  **字が行の上端に貼り付いて描かれとる**のを見つけて直した（`glyph_dy`）。
+  `line-height` の長さ指定が比率で継承されとった件も直した。geom 137 → 145、
+  悪化 0。詳細は「次に手を付ける二つ」の①②の【解決】。
+- `fractional-line-height` の WPT が落ちとるのは行の高さやなかった。test と
+  ref の頁の縦の長さが 8px 違うだけ（6400 = 800 × 8）で、絵は同じ。
+  HANDOFF の「8px 高い」はこれ。
+- この回も Linux。Chrome は `/opt/pw-browsers/chromium-1194/chrome-linux/chrome`
+  を `--no-sandbox` で使えた。
+
+### 2026-09-26 - Claude (日本語フォントのメモリ: fontdue を ab_glyph に)
+
+- 日本語 5 字で 529 MiB・1.05 秒 → 34.6 MiB・0.05 秒（Linux、wqy-zenhei）。
+  `fontdue` が開いた時点で全グリフを展開しとったのが原因。字送り・行の
+  高さ・外枠は差 0 を確かめてから替えた。詳細は「省リソース」の項の
+  【解決】。Windows と ja.wikipedia の実測は未。
+
+### 2026-09-26 - Claude (react.dev の settle CPU: soft navigation の印が下りん件)
+
+- 「差分適用が 34 回中 33 回断られる」を追うた。前の見立て（属性・テキストが
+  記録されとらん）は外れで、`history.replaceState` の soft navigation の印が
+  消えんせいで、DOM 不変のフレームが全部「移動」扱いになっとった。
+  一回渡したら下ろす + URL だけの変更は再構築せん、の二つで直した。
+  合成頁で 3.5 秒 → 0.31 秒、全体再構築 33 → 0。詳細は「省リソース」の項。
+- この回は Linux のクラウド環境。Windows のフォントが無いので
+  `cargo test --release --no-fail-fast` はフォント・字幅系の 7 本が
+  **修正前から**落ちる（1199 通過 / 7 落ち、修正前は 1197 / 7。
+  差の 2 本は足したテスト）。html5lib は 1213/1229 で不変。
+  外に出られるのは許可されたホストだけで、react.dev の実測はできとらん。
 
 ### 2026-09-18 - Claude (Windows、Mac 側の Claude と往復しながら)
 
@@ -1607,6 +1791,17 @@ react.dev だけ撮らんかった一枚が退化しとった。
     こう:  cursor_y_mpx  += line_height_mpx         丸めずに足す
            その行の y = mpx_to_px(cursor_y_mpx)     置くときだけ丸める
     ```
+    **【解決】2026-09-26。下の「箱が膨らむ」は、報告する高さを別に持って解いた。**
+    - 位置: `LayoutContext::y_frac_lu`（1/64px、Chrome の LayoutUnit）に行の端数を
+      繰り越す（`advance_exact`）。**行の高さは 1/64 に切り捨て**てから積む:
+      18.4 は 18.390625。こうせんと Chrome の p15=257 / p20=349 が出ん
+      （18.4 のまま積むと 258 / 350）。
+    - 高さ: hitbox（`getBoundingClientRect`）には「正確な上端から正確な下端まで」を
+      丸めた値を渡す（`exact_box_height`）。丸めた端同士の差やないので 18 のまま。
+      塗りは画素の境目のまま（Chrome も描くときは snap する）。
+      高さを明示した箱は、終わった所で端数を始まりの値に戻す。
+    - 結果: `drift.html` **1/6 → 6/6**。
+    以下は 09-20 の試行の記録:
     **やってみた（2026-09-20）。位置は直るが箱が膨らむので戻した。**
     検体 `tools/geom/drift.html`（`line-height:1.15` の `<p>` を 20 本 +
     `<br>` 10 行の塊）で A/B:
@@ -1621,7 +1816,34 @@ react.dev だけ撮らんかった一枚が退化しとった。
     積む。**つまり位置と高さの両方を合わせるには、塊の高さ自体を
     小数で持つしかない**。累算器だけでは片方しか取れん、というのが実測。
     HN / lobste.rs の画素差は債務ありでも動かんかった（11.65% / 10.59%）。
-  - ② **負の half-leading が 0 に潰されとる**（`below_baseline`、7215）。
+  - ② **【解決 2026-09-26】負の half-leading が 0 に潰されとる**（`below_baseline`、7215）。
+    `emit_line` の above / below を**両方**符号付きにした（`below_baseline_signed`）。
+    **それより大きい穴が同時に見つかった: 字が行の上端に貼り付いとった。**
+    `TextCommand.y` は行の上端で、painter はそこから `normal` のベースラインに
+    字を吊るしとったので、`line-height:60px` の字が行の一番上、短い行の字は
+    行の下にぶら下がり、小さい字は大きい字の頭に揃っとった（ベースラインに
+    載っとらん）。`TextCommand::glyph_dy`（本当のベースライン − normal の
+    ベースライン）を足して painter が使う。**`normal` の一行はずれ 0** なので
+    大半の頁の絵は動かん。
+    同時に `line-height` の長さ指定が比率で継承されとった件も直した
+    （`line_height_fixed_mpx`、change.md に記録）。`line-height:40px` の中の
+    32px の span が 80px の行になっとった（Chrome 40）。
+    **【続き 2026-09-27】leading の分け方を Chrome と同じにした**（`text_extent_lu`）。
+    ascent / descent をそれぞれ四捨五入した整数 px にして、leading =
+    line-height − (A+D)。**上側に行く半分は px に切り捨て**（Chrome の LayoutNG の
+    「floor() is to make text dump compatible」）、残りが下。前は normal の行の
+    高さ（line gap 込み）と切り上げの descent を使い、整数を 0 に向けて割っとった
+    ので、`line-height:10px` に 22px の字を混ぜた行が 11（Chrome 12）、字の
+    上端が行の上端に張り付いとった（Chrome は 8px はみ出す）。行の上下は
+    1/64px で積み、字の描画位置は「ベースライン − 切り上げ ascent」。
+    検体 `tools/geom/negleading.html`（**`font-family:"DejaVu Sans"` で Linux でも
+    両ブラウザ同じ書体**）が 4/15 → **15/15**、geom 全体 149 → 157/418。
+    leading.html が 13 → 10 に見えるのは、上の serif 行（k）が書体違いで 1px
+    高いぶんを、p が正しく 12 になったことで下の r* が引き継いだだけ。
+    結果: `tools/geom` 全体 137 → **145/403**（悪化 0）、leading 10 → 13、
+    WPT `split-inline-borders` の画素差 199186 → 41572（通過数は 9/26 のまま）。
+    **Linux の書体違いで横は測れとらん。Windows で geom と六枚の画素差を撮り直すこと。**
+    以下は 09-20 の記録:
     `line-height` が face の自然な高さより小さいと leading は負で、仕様は
     それを半分ずつ上下に配る（字が行からはみ出す）。`saturating_sub` が
     それを 0 にしとる。WPT の `vertical-align-negative-leading-001` の名前が

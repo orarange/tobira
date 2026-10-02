@@ -1,0 +1,25 @@
+<html><head><style>
+/* Negative half-leading, with a face both browsers have on Linux, so the
+   vertical numbers compare: line-height shorter than the letters, alone and
+   with a larger run on the line. */
+body{margin:0;font:16px "DejaVu Sans";width:800px}
+div{margin:0}
+.b{font-size:22px}
+.s{font-size:10px}
+</style></head><body>
+<div id="a" style="line-height:10px">Hxy</div>
+<div id="b" style="line-height:8px">Hxy</div>
+<div id="c" style="line-height:0.5">Hxy</div>
+<div id="d" style="line-height:13px">Hxy</div>
+<div id="e" style="line-height:10px">Hxy<span id="es" class="b">big</span>Hxy</div>
+<div id="f" style="line-height:10px">Hxy<span id="fs" class="s">small</span>Hxy</div>
+<div id="g" style="line-height:0.5">Hxy<span id="gs" class="b">big</span>Hxy</div>
+<div id="h" style="line-height:12px">Hxy<span id="hs" class="b" style="line-height:30px">big</span>Hxy</div>
+<div id="i" style="line-height:10px">a<br>b<br>c<br>d</div>
+<div id="j" style="line-height:normal">Hxy<span id="js" class="b">big</span>Hxy</div>
+<pre id="out"></pre><script>
+document.getElementById('out').textContent='a b c d e es f fs g gs h hs i j js'.split(' ').map(function(id){
+ var r=document.getElementById(id).getBoundingClientRect();
+ return id+' '+Math.round(r.x)+','+Math.round(r.y)+' '+Math.round(r.width)+'x'+Math.round(r.height);
+}).join('\n');
+</script></body></html>

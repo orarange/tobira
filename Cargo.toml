@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+ab_glyph = "0.2.32"
 arboard = "3.6.1"
 # boa_ast / boa_parser / boa_interner are used only by the self-built engine
 # (src/engine/) for its AST front-end. The boa runtime (boa_engine / boa_gc)
@@ -14,7 +15,6 @@ boa_parser = "0.22.0"
 brotli = "8.0.2"
 encoding_rs = "0.8.35"
 flate2 = "1.1.5"
-fontdue = "0.9.3"
 font8x8 = "0.3.1"
 image = { version = "0.25.8", default-features = false, features = ["bmp", "gif", "ico", "jpeg", "png", "webp"] }
 indexmap = "2"

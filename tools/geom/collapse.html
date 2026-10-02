@@ -1,0 +1,13 @@
+<html><head><style>body{margin:0;font:16px Arial;width:800px}
+#t1{border-collapse:collapse;width:400px}#t1 td{border:1px solid #000;padding:2px}
+#t2{border-collapse:collapse}#t2 td{border:3px solid #000;padding:2px}
+#t3{border-collapse:collapse;border:4px solid red}#t3 td{border:1px solid #000}
+</style></head><body>
+<table id="t1"><tr><td id="a">a</td><td id="b" colspan="2">b</td></tr><tr><td id="c">c</td><td>d</td><td>e</td></tr></table>
+<table id="t2"><tr><td id="d">a</td><td id="e">b</td></tr><tr><td id="f">c</td><td>d</td></tr></table>
+<table id="t3"><tr><td id="g">a</td><td id="h">b</td></tr></table>
+<div id="z">after</div>
+<pre id="out"></pre>
+<script>
+document.getElementById('out').textContent='t1 a b c t2 d e f t3 g h z'.split(' ').map(function(id){var r=document.getElementById(id).getBoundingClientRect();return id+' '+Math.round(r.x)+","+Math.round(r.y)+" "+Math.round(r.width)+"x"+Math.round(r.height);}).join('\n');
+</script></body></html>

@@ -1,6 +1,6 @@
 use crate::css::{
     AlignItems, AlignSelf, BackgroundSize, BoxSizing, ClearSide, Color,
-    ComputedStyle, Corners, CursorKind, DEFAULT_BACKGROUND_COLOR, Display, FlexDirection, FlexWrap,
+    ComputedStyle, Corners, CursorKind, DEFAULT_BACKGROUND_COLOR, Display, EdgeSizes, FlexDirection, FlexWrap,
     FloatSide, FontFamilyKind, GridEdge, GridTrackSize, JustifyContent, LengthValue, ListStyleType,
     ObjectFit, Overflow, Position, StyledElement, StyledNode, TableRole, TextAlign, TextTransform,
     VerticalAlign, WhiteSpaceMode, apply_text_transform,
@@ -458,6 +458,17 @@ pub struct TextCommand {
     pub text: String,
     pub font_size_mpx: u32,
     pub line_height_px: u32,
+    /// How far below `y` the glyphs are drawn, `y` being the top of the line.
+    ///
+    /// The painter hangs a run's letters from the top of the box it is given,
+    /// which puts the baseline where a `line-height: normal` line of that run
+    /// would have it. That is right only for a line of one size at its normal
+    /// spacing. A `line-height: 60px` line drew its text against its top edge
+    /// where every browser centres it, and a small run beside a large one sat
+    /// level with the large one's top instead of on the shared baseline. This
+    /// is the difference, so the letters land on the baseline the line box
+    /// was built around. Negative when the line is shorter than the letters.
+    pub glyph_dy: i32,
     pub font_family: FontFamilyKind,
     pub color: Color,
     pub underline: bool,
@@ -679,10 +690,10 @@ pub fn layout_styled_document(
             node_id: node_id as usize,
             x: left,
             y: top,
-            // An element that wrote nothing is zero wide, as a browser
-            // reports it, and cannot be hit.
+            // An element that wrote nothing is zero wide and zero tall, as a
+            // browser reports it, and cannot be hit.
             width: right.saturating_sub(left),
-            height: bottom.saturating_sub(top).max(1),
+            height: bottom.saturating_sub(top),
             cursor_kind,
             scroll_width: 0,
             scroll_height: 0,
@@ -800,6 +811,39 @@ struct LayoutContext {
     /// Boxes placed by `bottom` with `top` auto, waiting for the height of the
     /// block that contains them.
     pending_bottom: Vec<PendingBottom>,
+    /// Where the flow really is, below the whole pixel `cursor_y` stands on,
+    /// in 64ths of a pixel -- the unit Chrome lays out in. Between -32 and 31:
+    /// the cursor is the true position rounded.
+    ///
+    /// Lines are rarely a whole number of pixels tall (`line-height: 1.15` at
+    /// 16px is 18.4), and adding each one rounded lost 0.4px a line: twenty
+    /// paragraphs came out 7px short of Chrome, and a long page drew a second
+    /// copy of itself sliding down under the first in the pixel diff. The
+    /// cursor still moves in whole pixels; the part it could not move carries
+    /// into the next line instead of being dropped.
+    y_frac_lu: i32,
+}
+
+/// Pixels in Chrome's `LayoutUnit`.
+const LU_PER_PX: i64 = 64;
+
+/// Move `cursor_y` by an exact height in 64ths of a pixel, carrying what does
+/// not make a whole pixel in `context.y_frac_lu`.
+fn advance_exact(cursor_y: &mut u32, height_lu: i64, context: &mut LayoutContext) {
+    let total = i64::from(context.y_frac_lu) + height_lu;
+    // Rounded half up, the way the page's own `Math.round` of a rect reads it.
+    let pixels = (total + LU_PER_PX / 2).div_euclid(LU_PER_PX);
+    context.y_frac_lu = (total - pixels * LU_PER_PX) as i32;
+    *cursor_y = (i64::from(*cursor_y) + pixels).clamp(0, i64::from(u32::MAX)) as u32;
+}
+
+/// A box's height as a page reads it: the exact distance between its two
+/// edges, rounded -- not the difference of the two rounded edges. Twenty
+/// `line-height: 1.15` lines stand 367.8px apart; each 18.4px paragraph is
+/// reported 18 tall even where its rounded edges land 19 apart.
+fn exact_box_height(height_px: u32, frac_start: i32, frac_end: i32) -> u32 {
+    let exact = i64::from(height_px) * LU_PER_PX + i64::from(frac_end) - i64::from(frac_start);
+    ((exact + LU_PER_PX / 2).div_euclid(LU_PER_PX)).max(0) as u32
 }
 
 /// A box anchored to the bottom of its containing block.
@@ -851,6 +895,7 @@ impl Default for LayoutContext {
             next_stacking_seq: 0,
             lines_emitted: 0,
             pending_bottom: Vec::new(),
+            y_frac_lu: 0,
         }
     }
 }
@@ -969,6 +1014,36 @@ struct LineBuilder {
     markers: Vec<(usize, usize, u32, bool)>,
     width: u32,
     line_height: u32,
+}
+
+/// A collapsible space at the end of a run, held back until something
+/// follows it on the same line: a space at the end of a line is not part of
+/// it.
+#[derive(Clone)]
+struct OwedSpace {
+    /// The run the space was written in, which is the element it belongs to.
+    style: Arc<ComputedStyle>,
+    link_href: Option<String>,
+    link_node_id: Option<usize>,
+    /// How many marks the line held when it was written. Marks noted since
+    /// stand after it.
+    marks_before: usize,
+}
+
+impl OwedSpace {
+    fn new(
+        style: &Arc<ComputedStyle>,
+        link_href: Option<&str>,
+        link_node_id: Option<usize>,
+        line: &LineBuilder,
+    ) -> Self {
+        Self {
+            style: style.clone(),
+            link_href: link_href.map(str::to_string),
+            link_node_id,
+            marks_before: line.markers.len(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1122,13 +1197,30 @@ impl LineBuilder {
     ///
     /// Reuses whatever style the line already holds so that a space does not
     /// copy a `ComputedStyle` -- 520 bytes -- of its own.
-    fn push_space(&mut self, container_style: &ComputedStyle, fonts: &mut FontContext) {
-        let style = self
-            .spans
-            .last()
-            .map(|span| span.style.clone())
-            .unwrap_or_else(|| Arc::new(container_style.clone()));
-        self.push_span(" ", &style, fonts, None, None);
+    /// Write a space that was held back at the end of a run, now that
+    /// something follows it on the line.
+    ///
+    /// It is written in the style of the run it was in, and in front of every
+    /// mark noted since: in `three <span>trail </span>four` the space is
+    /// inside the span and the span closes after it. Written in the style of
+    /// whatever came next and behind the marks, it fell outside the element
+    /// that held it -- the span's background stopped short of it -- and inside
+    /// the next one.
+    fn push_owed_space(&mut self, owed: &OwedSpace, fonts: &mut FontContext) {
+        let later: Vec<_> = self
+            .markers
+            .drain(owed.marks_before.min(self.markers.len())..)
+            .collect();
+        self.push_span(
+            " ",
+            &owed.style,
+            fonts,
+            owed.link_href.as_deref(),
+            owed.link_node_id,
+        );
+        let at = self.spans.len();
+        self.markers
+            .extend(later.into_iter().map(|(_, _, node_id, open)| (at, 0, node_id, open)));
     }
 
     /// Note that an inline element begins or ends here.
@@ -2398,6 +2490,7 @@ fn layout_block_element(
     let _ = width_is_constrained;
 
     let background_top = *cursor_y;
+    let frac_at_top = context.y_frac_lu;
 
     // Detect stacking context: element has opacity < 255, filter: blur(), or CSS transform scale/rotate
     let needs_layer = element.style.opacity < 255
@@ -2734,6 +2827,17 @@ fn layout_block_element(
         settle_bottom_anchored(context, pending_mark, background_top, background_height);
     }
 
+    // A box whose content set its height ends where the content really ends,
+    // part-pixel and all. One whose height was imposed -- a stated height, a
+    // ratio, a stretch -- is that many whole pixels from its true top, so the
+    // part-pixel it started on is where the flow stands again after it.
+    let reported_height = if background_height == content_height {
+        exact_box_height(background_height, frac_at_top, context.y_frac_lu)
+    } else {
+        context.y_frac_lu = frac_at_top;
+        background_height
+    };
+
     // Emit element hitbox for interactive state (hover/focus) detection
     if let Some(node_id) = element_node_id(element) {
         // A flat or hairline box is still a box: `getBoundingClientRect` on a
@@ -2753,7 +2857,7 @@ fn layout_block_element(
                 x: outer_x,
                 y: background_top,
                 width: outer_width,
-                height: background_height,
+                height: reported_height,
                 cursor_kind: element.style.cursor_kind,
                 scroll_width,
                 scroll_height,
@@ -3112,7 +3216,7 @@ fn clip_text_to_box(
     let mut pen = text.x;
     let mut started = false;
     for character in text.text.chars() {
-        let advance = fonts.glyph_advance_px(character, text.font_size_mpx, text.font_family);
+        let advance = fonts.glyph_advance_px(character, text.font_size_mpx, text.font_family, text.bold);
         let next = pen.saturating_add(advance);
         // A glyph counts as visible only if it fits entirely inside the box:
         // the renderer draws whole glyphs, so a partly-covered one would spill.
@@ -3131,7 +3235,7 @@ fn clip_text_to_box(
     if kept.is_empty() {
         return None;
     }
-    let width = fonts.text_width_px(&kept, text.font_size_mpx, text.font_family);
+    let width = fonts.text_width_px(&kept, text.font_size_mpx, text.font_family, text.bold);
     Some(TextCommand {
         text: kept,
         x: kept_x,
@@ -4229,7 +4333,23 @@ fn layout_table_element(
         return;
     }
 
-    let spacing = parse_dimension_attribute(element.attributes.get("cellspacing")).unwrap_or(0);
+    // `border-collapse: collapse` shares each border between the two cells
+    // either side of it, so neighbouring cells overlap by the line between
+    // them and `cellspacing` no longer applies. Without it every inner
+    // border was drawn twice over and every row was a line too tall: a
+    // two-row table of 1px borders came out 48px where Chrome makes it 47,
+    // and everything below it on the page a pixel low.
+    let lines = element
+        .style
+        .border_collapse
+        .then(|| CollapsedLines::new(element, &placements, column_count, rows.len()));
+    let spacing = if lines.is_some() {
+        0
+    } else {
+        parse_dimension_attribute(element.attributes.get("cellspacing")).unwrap_or(0)
+    };
+    let overlap_x = lines.as_ref().map_or(0, |lines| lines.inner_columns(0, column_count));
+    let overlap_y = lines.as_ref().map_or(0, |lines| lines.inner_rows(0, rows.len()));
     // `cellpadding` is now the cells' own padding, set where the UA stylesheet
     // sits so the page can override it. Adding it again here counted it twice:
     // Hacker News grew 131px, so the UA default was dropped instead -- which
@@ -4237,12 +4357,19 @@ fn layout_table_element(
     let padding = 0;
     let available_width = width.max(1);
     let track_total_spacing = spacing.saturating_mul(column_count.saturating_sub(1) as u32);
-    let content_limit = available_width.saturating_sub(track_total_spacing).max(1);
+    let content_limit = available_width
+        .saturating_sub(track_total_spacing)
+        .saturating_add(overlap_x)
+        .max(1);
     let mut sizing =
         compute_column_widths(element, &placements, content_limit, padding, images, fonts);
+    if let Some(lines) = &lines {
+        lines.widen_columns(&placements, &mut sizing);
+    }
     let preferred_content_width = sizing.widths.iter().sum::<u32>();
     let preferred_table_width = preferred_content_width
         .saturating_add(track_total_spacing)
+        .saturating_sub(overlap_x)
         .max(1);
     // An anonymous table -- one CSS wrapped around a run of cells whose
     // parent never said `display: table` -- is a box of its own inside that
@@ -4254,7 +4381,10 @@ fn layout_table_element(
     } else {
         resolve_table_width(element, available_width, preferred_table_width)
     };
-    let target_content_width = table_width.saturating_sub(track_total_spacing).max(1);
+    let target_content_width = table_width
+        .saturating_sub(track_total_spacing)
+        .saturating_add(overlap_x)
+        .max(1);
     if preferred_content_width > target_content_width {
         shrink_column_widths(&mut sizing, preferred_content_width - target_content_width);
     } else {
@@ -4264,7 +4394,8 @@ fn layout_table_element(
     let table_width = column_widths
         .iter()
         .sum::<u32>()
-        .saturating_add(track_total_spacing);
+        .saturating_add(track_total_spacing)
+        .saturating_sub(overlap_x);
     // Where the table sits in the room it was given. `align` still decides it
     // on an old page; `margin: 0 auto` is how a modern one says the same
     // thing; and a `<center>` around it centres it, which is the whole point
@@ -4289,7 +4420,10 @@ fn layout_table_element(
     let mut next_form_id = context.next_form_id;
     for placement in &placements {
         let span_width = span_width(&column_widths, placement.column_index, placement.colspan)
-            .saturating_add(spacing.saturating_mul(placement.colspan.saturating_sub(1) as u32));
+            .saturating_add(spacing.saturating_mul(placement.colspan.saturating_sub(1) as u32))
+            .saturating_sub(lines.as_ref().map_or(0, |lines| {
+                lines.inner_columns(placement.column_index, placement.colspan)
+            }));
         let inner_width = span_width.saturating_sub(padding.saturating_mul(2)).max(1);
         let cell_backdrop = placement
             .cell
@@ -4305,6 +4439,7 @@ fn layout_table_element(
             current_form.clone(),
             next_control_id,
             next_form_id,
+            cell_borders(placement, lines.as_ref()),
         );
         next_control_id = layout.next_control_id;
         next_form_id = layout.next_form_id;
@@ -4338,18 +4473,30 @@ fn layout_table_element(
     for index in 1..row_count {
         row_offsets[index] = row_offsets[index - 1]
             .saturating_add(row_heights[index - 1])
-            .saturating_add(spacing);
+            .saturating_add(spacing)
+            .saturating_sub(lines.as_ref().map_or(0, |lines| lines.rows[index]));
     }
 
+    let mut cell_boxes = Vec::with_capacity(placements.len());
     for (placement, layout) in placements.iter().zip(cell_layouts.iter()) {
         let cell_x = table_x
             .saturating_add(span_width(&column_widths, 0, placement.column_index))
-            .saturating_add(spacing.saturating_mul(placement.column_index as u32));
+            .saturating_add(spacing.saturating_mul(placement.column_index as u32))
+            .saturating_sub(lines.as_ref().map_or(0, |lines| {
+                lines.columns[1..=placement.column_index].iter().sum::<u32>()
+            }));
         let cell_y = cursor_y.saturating_add(row_offsets[placement.row_index]);
         let cell_width = span_width(&column_widths, placement.column_index, placement.colspan)
-            .saturating_add(spacing.saturating_mul(placement.colspan.saturating_sub(1) as u32));
+            .saturating_add(spacing.saturating_mul(placement.colspan.saturating_sub(1) as u32))
+            .saturating_sub(lines.as_ref().map_or(0, |lines| {
+                lines.inner_columns(placement.column_index, placement.colspan)
+            }));
         let cell_height = cell_span_height(&row_heights, placement.row_index, placement.rowspan)
-            .saturating_add(spacing.saturating_mul(placement.rowspan.saturating_sub(1) as u32));
+            .saturating_add(spacing.saturating_mul(placement.rowspan.saturating_sub(1) as u32))
+            .saturating_sub(lines.as_ref().map_or(0, |lines| {
+                lines.inner_rows(placement.row_index, placement.rowspan)
+            }));
+        cell_boxes.push((cell_x, cell_y, cell_width, cell_height));
 
         let content_area_height = cell_height.saturating_sub(padding.saturating_mul(2));
         let vertical_offset = match placement.cell.style.vertical_align {
@@ -4548,12 +4695,19 @@ fn layout_table_element(
         if let Some(node_id) = element_node_id(placement.cell)
             && !placement.cell.style.pointer_events_none
         {
+            // A collapsed cell's box runs to the middle of each line round
+            // it, which is what Chrome reports: 0.5px in from a 1px line,
+            // rounded the way a page rounds it.
+            let (x, y, width, height) = match &lines {
+                Some(lines) => lines.half_box(placement, cell_x, cell_y, cell_width, cell_height),
+                None => (cell_x, cell_y, cell_width, cell_height),
+            };
             context.element_hitboxes.push(ElementHitbox {
                 node_id,
-                x: cell_x,
-                y: cell_y,
-                width: cell_width.max(1),
-                height: cell_height.max(1),
+                x,
+                y,
+                width: width.max(1),
+                height: height.max(1),
                 cursor_kind: placement.cell.style.cursor_kind,
                 scroll_width: 0,
                 scroll_height: 0,
@@ -4561,8 +4715,23 @@ fn layout_table_element(
         }
     }
 
-    let table_height = row_heights.iter().sum::<u32>()
-        + spacing.saturating_mul(row_count.saturating_sub(1) as u32);
+    // The borders go over every cell's background, so a neighbour painted
+    // later does not cover the line it shares with one painted earlier.
+    for (placement, &(cell_x, cell_y, cell_width, cell_height)) in
+        placements.iter().zip(cell_boxes.iter())
+    {
+        paint_cell_borders(
+            element,
+            placement,
+            lines.as_ref(),
+            (cell_x, cell_y, cell_width, cell_height),
+            context,
+        );
+    }
+
+    let table_height = (row_heights.iter().sum::<u32>()
+        + spacing.saturating_mul(row_count.saturating_sub(1) as u32))
+    .saturating_sub(overlap_y);
     // And the table's own box, for the same reason the cells needed one.
     if let Some(node_id) = element_node_id(element)
         && !element.style.pointer_events_none
@@ -4582,6 +4751,260 @@ fn layout_table_element(
     context.next_form_id = next_form_id;
     *cursor_y = cursor_y.saturating_add(table_height);
     *cursor_y = advance_by_margin(*cursor_y, element.style.margin.bottom);
+}
+
+/// A box's border widths, or none at all when its border style is `none`.
+fn own_borders(style: &ComputedStyle) -> EdgeSizes {
+    if style.border_style_none {
+        EdgeSizes::default()
+    } else {
+        style.border
+    }
+}
+
+/// The lines of a collapsed table: how wide each one is, the widest border
+/// that meets it -- the cells' either side, and the table's own on the
+/// outside. `columns` has one entry per vertical line, left to right, and
+/// `rows` one per horizontal line, top to bottom.
+///
+/// Chrome gives each cell half of every line round it, in fractions of a
+/// pixel. The cells here are laid out in whole pixels, so each one is given
+/// the whole of every line round it and its neighbours overlap it by the
+/// line they share. The table comes out the same size either way -- 47px for
+/// two rows of 1px lines, 53 for 3px ones -- and the box a page is shown for
+/// a cell is cut back to the middle of its lines (`half_box`).
+struct CollapsedLines {
+    columns: Vec<u32>,
+    rows: Vec<u32>,
+    /// The table's own borders, which take the outer lines where they are
+    /// wider than the cells'.
+    table: EdgeSizes,
+}
+
+impl CollapsedLines {
+    fn new(
+        table: &StyledElement,
+        placements: &[TablePlacement],
+        column_count: usize,
+        row_count: usize,
+    ) -> Self {
+        let mut columns = vec![0_u32; column_count + 1];
+        let mut rows = vec![0_u32; row_count + 1];
+        for placement in placements {
+            let borders = own_borders(&placement.cell.style);
+            let left = placement.column_index.min(column_count);
+            let right = (placement.column_index + placement.colspan).min(column_count);
+            let top = placement.row_index.min(row_count);
+            let bottom = (placement.row_index + placement.rowspan).min(row_count);
+            columns[left] = columns[left].max(borders.left);
+            columns[right] = columns[right].max(borders.right);
+            rows[top] = rows[top].max(borders.top);
+            rows[bottom] = rows[bottom].max(borders.bottom);
+        }
+        let table_borders = own_borders(&table.style);
+        columns[0] = columns[0].max(table_borders.left);
+        columns[column_count] = columns[column_count].max(table_borders.right);
+        rows[0] = rows[0].max(table_borders.top);
+        rows[row_count] = rows[row_count].max(table_borders.bottom);
+        Self {
+            columns,
+            rows,
+            table: table_borders,
+        }
+    }
+
+    /// The lines inside `span` columns from `start`, which the cells either
+    /// side of them share.
+    fn inner_columns(&self, start: usize, span: usize) -> u32 {
+        let end = (start + span).min(self.columns.len().saturating_sub(1));
+        self.columns
+            .get(start + 1..end)
+            .map_or(0, |lines| lines.iter().sum())
+    }
+
+    fn inner_rows(&self, start: usize, span: usize) -> u32 {
+        let end = (start + span).min(self.rows.len().saturating_sub(1));
+        self.rows
+            .get(start + 1..end)
+            .map_or(0, |lines| lines.iter().sum())
+    }
+
+    /// The lines round a cell.
+    fn around(&self, placement: &TablePlacement) -> EdgeSizes {
+        let last_column = self.columns.len() - 1;
+        let last_row = self.rows.len() - 1;
+        EdgeSizes {
+            top: self.rows[placement.row_index.min(last_row)],
+            right: self.columns[(placement.column_index + placement.colspan).min(last_column)],
+            bottom: self.rows[(placement.row_index + placement.rowspan).min(last_row)],
+            left: self.columns[placement.column_index.min(last_column)],
+        }
+    }
+
+    /// Columns were measured with each cell's own borders; a line wider than
+    /// a cell's border needs the difference as well. A 4px table border
+    /// round 1px cells makes the outer columns three pixels wider.
+    fn widen_columns(&self, placements: &[TablePlacement], sizing: &mut TableColumnSizing) {
+        let mut extra = vec![0_u32; sizing.widths.len()];
+        for placement in placements.iter().filter(|placement| placement.colspan == 1) {
+            let own = own_borders(&placement.cell.style);
+            let lines = self.around(placement);
+            let wider = (lines.left + lines.right).saturating_sub(own.left + own.right);
+            if let Some(slot) = extra.get_mut(placement.column_index) {
+                *slot = (*slot).max(wider);
+            }
+        }
+        for (index, wider) in extra.into_iter().enumerate() {
+            sizing.widths[index] = sizing.widths[index].saturating_add(wider);
+            if let Some(min) = sizing.mins.get_mut(index) {
+                *min = min.saturating_add(wider);
+            }
+        }
+    }
+
+    /// A cell's box cut back to the middle of the lines round it, rounded
+    /// to whole pixels the way `getBoundingClientRect` is read: 0.5 up.
+    fn half_box(
+        &self,
+        placement: &TablePlacement,
+        x: u32,
+        y: u32,
+        width: u32,
+        height: u32,
+    ) -> (u32, u32, u32, u32) {
+        let lines = self.around(placement);
+        let half = |whole: u32, lead: u32, trail: u32| {
+            let start = i64::from(whole) * 2 + i64::from(lead);
+            (start, i64::from(lead) + i64::from(trail))
+        };
+        let round = |halves: i64| ((halves + 1).div_euclid(2)).max(0) as u32;
+        let (x2, x_lines) = half(x, lines.left, lines.right);
+        let (y2, y_lines) = half(y, lines.top, lines.bottom);
+        (
+            round(x2),
+            round(y2),
+            round(i64::from(width) * 2 - x_lines),
+            round(i64::from(height) * 2 - y_lines),
+        )
+    }
+}
+
+/// The borders a cell is laid out with: its own, or in a collapsed table the
+/// lines round it.
+fn cell_borders(placement: &TablePlacement, lines: Option<&CollapsedLines>) -> EdgeSizes {
+    match lines {
+        Some(lines) => lines.around(placement),
+        None => own_borders(&placement.cell.style),
+    }
+}
+
+/// Draw a cell's borders. They took up room in the layout and were never
+/// painted, so a table drawn with `td { border: 1px solid }` showed no lines.
+/// In a collapsed table an outer line the table's own border is wider than
+/// the cell's is drawn in the table's colour.
+fn paint_cell_borders(
+    table: &StyledElement,
+    placement: &TablePlacement,
+    lines: Option<&CollapsedLines>,
+    (x, y, width, height): (u32, u32, u32, u32),
+    context: &mut LayoutContext,
+) {
+    let style = &placement.cell.style;
+    let widths = cell_borders(placement, lines);
+    let own = own_borders(style);
+    let cell_color =
+        (!style.border_style_none && !style.border_color_transparent).then_some(style.border_color);
+    let table_color = (!table.style.border_style_none && !table.style.border_color_transparent)
+        .then_some(table.style.border_color);
+    let last_column = lines.map_or(0, |lines| lines.columns.len() - 1);
+    let last_row = lines.map_or(0, |lines| lines.rows.len() - 1);
+    let table_borders = lines.map_or_else(EdgeSizes::default, |lines| lines.table);
+    // Which border a side of a collapsed cell is drawn with: the widest one
+    // that meets it wins the line. The table's wins an outer line only when it
+    // is wider than the cell's; a neighbour's wider border wins a shared line
+    // and is drawn by the neighbour; and an outer line made wide by another
+    // cell in the row keeps this cell's own, thinner border in its middle.
+    // Returns the colour, how thick to draw, and how far in from the line's
+    // outer edge.
+    let side = |outer: bool, line: u32, table_width: u32, own_width: u32| {
+        if lines.is_none() {
+            return cell_color.map(|color| (color, line, 0));
+        }
+        if outer && table_width > own_width {
+            return table_color.map(|color| (color, line, 0));
+        }
+        if own_width >= line {
+            return cell_color.map(|color| (color, line, 0));
+        }
+        if !outer || own_width == 0 {
+            return None;
+        }
+        cell_color.map(|color| (color, own_width, (line - own_width) / 2))
+    };
+    let top = side(placement.row_index == 0, widths.top, table_borders.top, own.top);
+    let bottom = side(
+        placement.row_index + placement.rowspan >= last_row,
+        widths.bottom,
+        table_borders.bottom,
+        own.bottom,
+    );
+    let left = side(placement.column_index == 0, widths.left, table_borders.left, own.left);
+    let right = side(
+        placement.column_index + placement.colspan >= last_column,
+        widths.right,
+        table_borders.right,
+        own.right,
+    );
+    if let Some((color, thick, inset)) = top {
+        push_border_bar(context, style, color, x, y + inset, width, thick);
+    }
+    if let Some((color, thick, inset)) = bottom {
+        push_border_bar(
+            context,
+            style,
+            color,
+            x,
+            (y + height).saturating_sub(inset + thick),
+            width,
+            thick,
+        );
+    }
+    if let Some((color, thick, inset)) = left {
+        push_border_bar(context, style, color, x + inset, y, thick, height);
+    }
+    if let Some((color, thick, inset)) = right {
+        push_border_bar(
+            context,
+            style,
+            color,
+            (x + width).saturating_sub(inset + thick),
+            y,
+            thick,
+            height,
+        );
+    }
+}
+
+fn push_border_bar(
+    context: &mut LayoutContext,
+    style: &ComputedStyle,
+    color: Color,
+    x: u32,
+    y: u32,
+    width: u32,
+    height: u32,
+) {
+    if width == 0 || height == 0 {
+        return;
+    }
+    context.commands.push(DrawCommand::Rect(RectCommand {
+        x,
+        y,
+        width,
+        height,
+        color: apply_opacity(color, context.background_color, style.effective_opacity),
+        border_radius: Corners::ZERO,
+    }));
 }
 
 #[derive(Debug, Clone)]
@@ -4885,6 +5308,7 @@ fn layout_table_cell(
     current_form: Option<FormContext>,
     control_id_seed: usize,
     form_id_seed: usize,
+    borders: EdgeSizes,
 ) -> FragmentLayout {
     let mut context = LayoutContext {
         background_color,
@@ -4899,27 +5323,11 @@ fn layout_table_cell(
     // other box. Only the legacy `cellpadding` attribute was counted, so a
     // table styled the modern way -- `td { padding: 4px; border: 1px }` --
     // came out two pixels short of its content on every side and the rows sat
-    // tighter than the page asked for.
-    let (border_x, border_y) = if cell.style.border_style_none {
-        (0, 0)
-    } else {
-        (
-            cell.style.border.left + cell.style.border.right,
-            cell.style.border.top + cell.style.border.bottom,
-        )
-    };
-    let inset_left = cell.style.padding.left
-        + if cell.style.border_style_none {
-            0
-        } else {
-            cell.style.border.left
-        };
-    let inset_top = cell.style.padding.top
-        + if cell.style.border_style_none {
-            0
-        } else {
-            cell.style.border.top
-        };
+    // tighter than the page asked for. The borders are handed in: in a
+    // collapsed table they are the shared lines, not the cell's own.
+    let (border_x, border_y) = (borders.left + borders.right, borders.top + borders.bottom);
+    let inset_left = cell.style.padding.left + borders.left;
+    let inset_top = cell.style.padding.top + borders.top;
     let surround_x = cell.style.padding.left + cell.style.padding.right + border_x;
     let surround_y = cell.style.padding.top + cell.style.padding.bottom + border_y;
     let inner_width = width.saturating_sub(surround_x).max(1);
@@ -5042,6 +5450,7 @@ fn offset_draw_command(cmd: &DrawCommand, offset_x: u32, offset_y: u32) -> DrawC
             text: text.text.clone(),
             font_size_mpx: text.font_size_mpx,
             line_height_px: text.line_height_px,
+            glyph_dy: text.glyph_dy,
             font_family: text.font_family,
             color: text.color,
             underline: text.underline,
@@ -5224,6 +5633,21 @@ fn layout_mixed_children(
                     )
             })
         {
+            // The elements in it still exist, and a page can ask where they
+            // are: an empty `<span>` between the newlines of a block answers
+            // with a zero-sized box where the content would begin, not with
+            // nothing at 0,0.
+            for fragment in inline_fragments.iter() {
+                if let InlineFragment::BoxStart(node_id) = fragment {
+                    context.inline_rects.entry(*node_id).or_insert((
+                        x,
+                        *cursor_y,
+                        x,
+                        *cursor_y,
+                        CursorKind::Auto,
+                    ));
+                }
+            }
             inline_fragments.clear();
             return;
         }
@@ -5779,7 +6203,7 @@ fn layout_nowrap_fragments(
 ) {
     let mut line = LineBuilder::default();
     let text_indent = container_style.text_indent;
-    let mut pending_space = false;
+    let mut pending_space: Option<OwedSpace> = None;
 
     for fragment in fragments {
         match fragment {
@@ -5788,33 +6212,30 @@ fn layout_nowrap_fragments(
                 // same as it is before an image. Dropped, `text <span>` came
                 // out four pixels narrower than the page asked for and
                 // everything after it on the line moved left.
-                if pending_space && !line.is_empty() {
-                    line.push_span(" ", &atomic.style, fonts, None, None);
+                if let Some(owed) = pending_space.take()
+                    && !line.is_empty()
+                {
+                    line.push_owed_space(&owed, fonts);
                 }
                 line.push_atomic(atomic.clone(), container_style);
-                pending_space = false;
             }
             // Zero width, drawn as nothing: it only says where an inline
             // element begins or ends on this line. A space still owed from
-            // the run before is written first, so it belongs to whatever the
-            // element was written beside rather than to the element itself.
-            InlineFragment::BoxStart(node_id) => {
-                if pending_space && !line.is_empty() {
-                    line.push_space(container_style, fonts);
-                    pending_space = false;
-                }
-                line.push_marker(*node_id, true);
-            }
+            // the run before is written in front of it when something
+            // follows (`push_owed_space`).
+            InlineFragment::BoxStart(node_id) => line.push_marker(*node_id, true),
             InlineFragment::BoxEnd(node_id) => line.push_marker(*node_id, false),
             InlineFragment::LineBreak => {
                 // nowrap: ignore line breaks
             }
             InlineFragment::Control(control) => {
-                if pending_space && !line.is_empty() {
-                    line.push_span(" ", &control.style, fonts, None, None);
+                if let Some(owed) = pending_space.take()
+                    && !line.is_empty()
+                {
+                    line.push_owed_space(&owed, fonts);
                 }
                 line.push_control(control, fonts);
-                pending_space = true;
+                pending_space = Some(OwedSpace::new(&control.style, None, None, &line));
             }
             InlineFragment::Image {
                 src,
@@ -5824,8 +6245,10 @@ fn layout_nowrap_fragments(
                 link_href,
                 link_node_id,
             } => {
-                if pending_space && !line.is_empty() {
-                    line.push_span(" ", style, fonts, link_href.as_deref(), *link_node_id);
+                if let Some(owed) = pending_space.take()
+                    && !line.is_empty()
+                {
+                    line.push_owed_space(&owed, fonts);
                 }
                 line.push_image(
                     src,
@@ -5836,7 +6259,12 @@ fn layout_nowrap_fragments(
                     *link_node_id,
                     fonts,
                 );
-                pending_space = true;
+                pending_space = Some(OwedSpace::new(
+                    style,
+                    link_href.as_deref(),
+                    *link_node_id,
+                    &line,
+                ));
             }
             InlineFragment::Text {
                 text,
@@ -5849,25 +6277,33 @@ fn layout_nowrap_fragments(
                     .next()
                     .map(char::is_whitespace)
                     .unwrap_or(false);
-                let ends_with_whitespace = text
-                    .chars()
-                    .last()
-                    .map(char::is_whitespace)
-                    .unwrap_or(false);
                 let words = line_break_segments(text);
-                let mut needs_space = pending_space || starts_with_whitespace;
+                let mut needs_space = pending_space.is_some() || starts_with_whitespace;
+                let mut wrote_words = false;
                 for (index, (word, space_before)) in words.into_iter().enumerate() {
+                    let owed = if index == 0 { pending_space.take() } else { None };
                     if index > 0 {
                         needs_space = space_before;
                     }
                     if needs_space && !line.is_empty() {
-                        line.push_span(" ", style, fonts, link_href.as_deref(), *link_node_id);
+                        let owed = owed.unwrap_or_else(|| {
+                            OwedSpace::new(style, link_href.as_deref(), *link_node_id, &line)
+                        });
+                        line.push_owed_space(&owed, fonts);
                     }
                     line.push_span(word, style, fonts, link_href.as_deref(), *link_node_id);
                     needs_space = true;
+                    wrote_words = true;
                 }
-                pending_space = ends_with_whitespace
-                    || (text.chars().any(char::is_whitespace) && line.is_empty());
+                pending_space = owed_after_text(
+                    text,
+                    wrote_words,
+                    pending_space,
+                    style,
+                    link_href.as_deref(),
+                    *link_node_id,
+                    &line,
+                );
             }
         }
     }
@@ -5892,6 +6328,34 @@ fn layout_nowrap_fragments(
 /// question as simple as "how many lines would this be?" has to be asked by
 /// doing the work and then undoing it. Only text runs are ever tried this way,
 /// so nothing but those three lists and the cursor can have moved.
+/// What space a text run leaves owing to whatever follows it.
+///
+/// A run that wrote words owes the space it ends with, in its own style. One
+/// that is nothing but white space adds nothing to a space already owed --
+/// the first of a row of collapsible spaces is the one kept, so in
+/// `a <span> </span>b` the space is the one after `a`, outside the span --
+/// and otherwise owes its own.
+fn owed_after_text(
+    text: &str,
+    wrote_words: bool,
+    owed: Option<OwedSpace>,
+    style: &Arc<ComputedStyle>,
+    link_href: Option<&str>,
+    link_node_id: Option<usize>,
+    line: &LineBuilder,
+) -> Option<OwedSpace> {
+    let ends_with_whitespace = text.chars().last().is_some_and(char::is_whitespace);
+    if wrote_words {
+        return ends_with_whitespace
+            .then(|| OwedSpace::new(style, link_href, link_node_id, line));
+    }
+    owed.or_else(|| {
+        text.chars()
+            .any(char::is_whitespace)
+            .then(|| OwedSpace::new(style, link_href, link_node_id, line))
+    })
+}
+
 fn trial_line_count(
     fragments: &[InlineFragment],
     container_style: &ComputedStyle,
@@ -6050,7 +6514,7 @@ fn layout_normal_fragments_at(
     let ellipsis_mode =
         container_style.text_overflow_ellipsis && container_style.overflow == Overflow::Hidden;
     let mut line = LineBuilder::default();
-    let mut pending_space = false;
+    let mut pending_space: Option<OwedSpace> = None;
     let text_indent = container_style.text_indent;
     let mut first_line = true;
     let mut ellipsis_done = false; // in ellipsis mode, once we clip, we're done
@@ -6061,23 +6525,18 @@ fn layout_normal_fragments_at(
         }
         match fragment {
             InlineFragment::Atomic(atomic) => {
-                if pending_space && !line.is_empty() {
-                    line.push_span(" ", &atomic.style, fonts, None, None);
+                if let Some(owed) = pending_space.take()
+                    && !line.is_empty()
+                {
+                    line.push_owed_space(&owed, fonts);
                 }
                 line.push_atomic(atomic.clone(), container_style);
-                pending_space = false;
             }
             // Zero width, drawn as nothing: it only says where an inline
             // element begins or ends on this line. A space still owed from
-            // the run before is written first, so it belongs to whatever the
-            // element was written beside rather than to the element itself.
-            InlineFragment::BoxStart(node_id) => {
-                if pending_space && !line.is_empty() {
-                    line.push_space(container_style, fonts);
-                    pending_space = false;
-                }
-                line.push_marker(*node_id, true);
-            }
+            // the run before is written in front of it when something
+            // follows (`push_owed_space`).
+            InlineFragment::BoxStart(node_id) => line.push_marker(*node_id, true),
             InlineFragment::BoxEnd(node_id) => line.push_marker(*node_id, false),
             InlineFragment::LineBreak => {
                 if ellipsis_mode {
@@ -6094,7 +6553,7 @@ fn layout_normal_fragments_at(
                         if first_line { text_indent } else { 0 },
                     );
                     first_line = false;
-                    pending_space = false;
+                    pending_space = None;
                 }
             }
             InlineFragment::Control(control) => {
@@ -6105,9 +6564,10 @@ fn layout_normal_fragments_at(
                     width
                 };
 
-                let pending_space_before_control = pending_space && !line.is_empty();
-                if pending_space_before_control {
-                    let space_width = char_width(&control.style, ' ', fonts);
+                if let Some(owed) = pending_space.take()
+                    && !line.is_empty()
+                {
+                    let space_width = char_width(&owed.style, ' ', fonts);
                     if line.width.saturating_add(space_width) > effective_width {
                         if ellipsis_mode {
                             // Apply ellipsis and stop
@@ -6132,7 +6592,7 @@ fn layout_normal_fragments_at(
                         );
                         first_line = false;
                     } else {
-                        line.push_span(" ", &control.style, fonts, None, None);
+                        line.push_owed_space(&owed, fonts);
                     }
                 }
 
@@ -6160,7 +6620,7 @@ fn layout_normal_fragments_at(
                     first_line = false;
                 }
                 line.push_control(control, fonts);
-                pending_space = true;
+                pending_space = Some(OwedSpace::new(&control.style, None, None, &line));
             }
             InlineFragment::Image {
                 src,
@@ -6176,8 +6636,10 @@ fn layout_normal_fragments_at(
                     width
                 };
 
-                if pending_space && !line.is_empty() {
-                    let space_width = char_width(style, ' ', fonts);
+                if let Some(owed) = pending_space.take()
+                    && !line.is_empty()
+                {
+                    let space_width = char_width(&owed.style, ' ', fonts);
                     if line.width.saturating_add(space_width) > effective_width {
                         if ellipsis_mode {
                             apply_ellipsis_to_line(
@@ -6201,7 +6663,7 @@ fn layout_normal_fragments_at(
                         );
                         first_line = false;
                     } else {
-                        line.push_span(" ", style, fonts, link_href.as_deref(), *link_node_id);
+                        line.push_owed_space(&owed, fonts);
                     }
                 }
 
@@ -6237,7 +6699,12 @@ fn layout_normal_fragments_at(
                     *link_node_id,
                     fonts,
                 );
-                pending_space = true;
+                pending_space = Some(OwedSpace::new(
+                    style,
+                    link_href.as_deref(),
+                    *link_node_id,
+                    &line,
+                ));
             }
             InlineFragment::Text {
                 text,
@@ -6250,15 +6717,12 @@ fn layout_normal_fragments_at(
                     .next()
                     .map(char::is_whitespace)
                     .unwrap_or(false);
-                let ends_with_whitespace = text
-                    .chars()
-                    .last()
-                    .map(char::is_whitespace)
-                    .unwrap_or(false);
                 let words = line_break_segments(text);
-                let mut needs_space = pending_space || starts_with_whitespace;
+                let mut needs_space = pending_space.is_some() || starts_with_whitespace;
+                let mut wrote_words = false;
 
                 for (index, (word, space_before)) in words.into_iter().enumerate() {
+                    let owed = if index == 0 { pending_space.take() } else { None };
                     if index > 0 {
                         needs_space = space_before;
                     }
@@ -6272,7 +6736,10 @@ fn layout_normal_fragments_at(
                     };
 
                     if needs_space && !line.is_empty() {
-                        let space_width = char_width(style, ' ', fonts);
+                        let owed = owed.unwrap_or_else(|| {
+                            OwedSpace::new(style, link_href.as_deref(), *link_node_id, &line)
+                        });
+                        let space_width = char_width(&owed.style, ' ', fonts);
                         if line.width.saturating_add(space_width) > effective_width {
                             if ellipsis_mode {
                                 apply_ellipsis_to_line(
@@ -6296,13 +6763,14 @@ fn layout_normal_fragments_at(
                             );
                             first_line = false;
                         } else {
-                            line.push_span(" ", style, fonts, link_href.as_deref(), *link_node_id);
+                            line.push_owed_space(&owed, fonts);
                         }
                     }
 
                     if ellipsis_done {
                         break;
                     }
+                    wrote_words = true;
 
                     let effective_width2 = if first_line && line.is_empty() {
                         width_after_indent(width, text_indent)
@@ -6355,8 +6823,15 @@ fn layout_normal_fragments_at(
                     }
                 }
 
-                pending_space = ends_with_whitespace
-                    || (text.chars().any(char::is_whitespace) && line.is_empty());
+                pending_space = owed_after_text(
+                    text,
+                    wrote_words,
+                    pending_space,
+                    style,
+                    link_href.as_deref(),
+                    *link_node_id,
+                    &line,
+                );
             }
         }
     }
@@ -6411,7 +6886,12 @@ fn apply_ellipsis_to_line(
                 let mut tw = 0u32;
                 for ch in span.text.chars() {
                     let cw =
-                        fonts.glyph_advance_px(ch, span.style.font_size_mpx, span.style.font_family);
+                        fonts.glyph_advance_px(
+                        ch,
+                        span.style.font_size_mpx,
+                        span.style.font_family,
+                        span.style.font_weight,
+                    );
                     if tw.saturating_add(cw) > available {
                         break;
                     }
@@ -6710,7 +7190,7 @@ fn apply_inline_marks(
     markers: &[(usize, usize, u32, bool)],
     span_index: usize,
     span: Option<&LineSpan>,
-    cursor_x: u32,
+    cursor_x_lu: i64,
     line_top: u32,
     strut_height: u32,
     fonts: &mut FontContext,
@@ -6721,13 +7201,15 @@ fn apply_inline_marks(
         if *at != span_index {
             continue;
         }
-        // A mark inside a run stands where the text before it ends.
-        let cursor_x = match span {
+        // A mark inside a run stands where the text before it ends, measured
+        // exactly and rounded once.
+        let mark_lu = match span {
             Some(span) if *offset > 0 && *offset <= span.text.len() => {
-                cursor_x.saturating_add(text_width(&span.style, &span.text[..*offset], fonts))
+                cursor_x_lu + text_width_lu(&span.style, &span.text[..*offset], fonts)
             }
-            _ => cursor_x,
+            _ => cursor_x_lu,
         };
+        let cursor_x = ((mark_lu + LU_PER_PX / 2).div_euclid(LU_PER_PX)).max(0) as u32;
         if *open {
             // Opened, but nothing in it yet: the vertical extent is left
             // empty (top above bottom) so that the first run inside sets it.
@@ -6775,7 +7257,8 @@ fn emit_line_impl(
         // element that wrote no content; they are dropped rather than carried
         // into the next line, where they would name the wrong place.
         line.spans.clear();
-        *cursor_y = cursor_y.saturating_add(text_line_height(container_style, fonts));
+        let height_lu = text_line_height_lu(container_style, fonts);
+        advance_exact(cursor_y, height_lu, context);
         return;
     }
 
@@ -6811,15 +7294,23 @@ fn emit_line_impl(
     // Everything on a line is hung from the same baseline. A box taller than
     // the text grows the line downwards, not upwards -- so a 40px badge beside
     // a line of type has its top level with the text's, not its bottom.
-    let strut_below = below_baseline(container_style, fonts);
-    let mut above = text_line_height(container_style, fonts).saturating_sub(strut_below);
-    let mut below = strut_below;
+    //
+    // Both halves are signed. A line shorter than its letters has negative
+    // leading, and the standard splits it above and below just as it does a
+    // positive one: the letters overhang the line on both sides. Floored at
+    // zero, the whole shortfall came off the top instead, and the text of a
+    // `line-height: 6px` line hung below it.
+    //
+    // Kept in 64ths of a pixel: a line of `line-height: 1.15` is 18.390625px
+    // tall, and the part-pixel carries into the next line (`advance_exact`).
+    let px = LU_PER_PX;
+    let (mut above, mut below) = text_extent_lu(container_style, fonts);
     let mut min_line_height = 0_u32;
     for span in &line.spans {
         if span.control.is_some() {
             // A control is centred on the line rather than hung from it.
-            above = above.max(span.height / 2);
-            below = below.max(span.height - span.height / 2);
+            above = above.max(i64::from(span.height / 2) * px);
+            below = below.max(i64::from(span.height - span.height / 2) * px);
             continue;
         }
         // A box aligned to the top or the bottom of the line is not hung
@@ -6835,36 +7326,44 @@ fn emit_line_impl(
             min_line_height = min_line_height.max(span.height);
             continue;
         }
-        let span_above = if let Some(atomic) = &span.atomic {
-            match span.style.vertical_align {
+        let (span_above, span_below) = if let Some(atomic) = &span.atomic {
+            let span_above = match span.style.vertical_align {
                 // The box's middle sits half an x-height above the baseline.
                 VerticalAlign::Middle => span
                     .height
                     .div_ceil(2)
                     .saturating_add(x_half_height(&span.style)),
                 _ => atomic_span_baseline(atomic, &span.style, span.height, fonts),
-            }
+            };
+            (
+                i64::from(span_above) * px,
+                i64::from(span.height.saturating_sub(span_above)) * px,
+            )
         } else if span.image.is_some() {
-            span.height
+            (i64::from(span.height) * px, 0)
         } else {
-            text_line_height(&span.style, fonts).saturating_sub(below_baseline(&span.style, fonts))
+            text_extent_lu(&span.style, fonts)
         };
         // A raised or lowered run is that much further from the baseline, so
         // the line has to make room for it: a superscript on the first line of
         // a paragraph must not be cut off by the box above.
-        let shift = span.style.baseline_shift;
-        above = above.max(span_above.saturating_add_signed(-shift));
-        below = below.max(
-            span.height
-                .saturating_sub(span_above)
-                .saturating_add_signed(shift),
-        );
+        let shift = i64::from(span.style.baseline_shift_lu);
+        above = above.max(span_above - shift);
+        below = below.max(span_below + shift);
     }
-    let line_height = above
-        .saturating_add(below)
-        .max(line.line_height.min(above + below).max(1))
-        .max(min_line_height);
-    let baseline = above;
+    // Never less than a pixel, as before: an empty-looking line still steps.
+    let line_height_lu = (above + below)
+        .max(px)
+        .max(i64::from(min_line_height) * px);
+    let line_height = ((line_height_lu + px / 2).div_euclid(px)).max(1) as u32;
+    // Where the baseline stands below the top of the line. A whole number of
+    // pixels for plain text, since the leading above it is floored to one; a
+    // raised run can make it a fraction (6.328125px for a superscript at
+    // 16px), which is kept for placing the runs and rounded for the rest. It
+    // can sit above the top only if the whole line is overhang.
+    let baseline_lu = above;
+    let baseline_signed = (above + px / 2).div_euclid(px) as i32;
+    let baseline = baseline_signed.max(0) as u32;
     // The height an inline element falls back to when its runs have not been
     // walked yet, or when it wrote nothing at all: its CONTENT area, not the
     // line's advance. Two spans on one line disagreed because of this -- the
@@ -6874,8 +7373,16 @@ fn emit_line_impl(
     let strut_content = text_content_height(container_style, fonts);
     // The inline elements whose runs are being walked right now.
     let mut open_inlines: Vec<u32> = Vec::new();
+    // Where the pen really is, in 64ths of a pixel. Each run is placed where
+    // this rounds to, and the pen moves on by the run's exact width: a word
+    // and the space after it are 37.35 and 4.45px in 16px Arial, and adding
+    // them rounded put the next word at 41 where Chrome puts it at 42.
+    let mut cursor_x_lu = i64::from(cursor_x) * px;
 
     for (span_index, span) in line.spans.iter().enumerate() {
+        cursor_x = ((cursor_x_lu + px / 2).div_euclid(px)).max(0) as u32;
+        let span_width_lu = span_exact_width_lu(span, fonts);
+        let span_right = ((cursor_x_lu + span_width_lu + px / 2).div_euclid(px)).max(0) as u32;
         // An inline element's box grows to hold wherever its runs land. The
         // opening mark fixes its left edge, the closing one its right; the
         // height comes from the runs between them, not from the line, so a
@@ -6884,7 +7391,7 @@ fn emit_line_impl(
             &line.markers,
             span_index,
             Some(span),
-            cursor_x,
+            cursor_x_lu,
             *cursor_y,
             strut_content,
             fonts,
@@ -6905,18 +7412,26 @@ fn emit_line_impl(
             } else {
                 text_content_height(&span.style, fonts)
             };
+            // A run of text covers its content area: from its ascent above
+            // the baseline to its descent below, whatever the line spacing.
             let run_above = if span.atomic.is_some() || span.image.is_some() {
-                span.height
+                span.height as i32
             } else {
-                text_line_height(&span.style, fonts)
-                    .saturating_sub(below_baseline(&span.style, fonts))
+                fonts
+                    .rounded_ascent_descent_px(span.style.font_size_mpx, span.style.font_family)
+                    .0
             };
-            let top = cursor_y
-                .saturating_add(baseline)
-                .saturating_sub(run_above)
-                .saturating_add_signed(span.style.baseline_shift);
+            // From where the line really starts, part-pixel included: after a
+            // 22.33px line with a superscript in it, the next line's
+            // subscript lands half a pixel lower than the rounded top says.
+            let top_lu = i64::from(*cursor_y) * px
+                + i64::from(context.y_frac_lu)
+                + baseline_lu
+                - i64::from(run_above) * px
+                + i64::from(span.style.baseline_shift_lu);
+            let top = (top_lu + px / 2).div_euclid(px).max(0) as u32;
             let bottom = top.saturating_add(run_height);
-            let right = cursor_x.saturating_add(span.width);
+            let right = span_right;
             for node_id in &open_inlines {
                 if let Some(entry) = context.inline_rects.get_mut(node_id) {
                     entry.1 = entry.1.min(top);
@@ -6955,7 +7470,7 @@ fn emit_line_impl(
                 native_chrome,
             });
 
-            cursor_x = cursor_x.saturating_add(span.width);
+            cursor_x_lu += span_width_lu;
             continue;
         }
 
@@ -6998,7 +7513,7 @@ fn emit_line_impl(
                 hitbox.y = hitbox.y.saturating_add(box_y);
                 context.element_hitboxes.push(hitbox);
             }
-            cursor_x = cursor_x.saturating_add(span.width);
+            cursor_x_lu += span_width_lu;
             continue;
         }
 
@@ -7067,7 +7582,7 @@ fn emit_line_impl(
                 }
             }
 
-            cursor_x = cursor_x.saturating_add(span.width);
+            cursor_x_lu += span_width_lu;
             continue;
         }
 
@@ -7100,11 +7615,16 @@ fn emit_line_impl(
         };
         context.commands.push(DrawCommand::Text(TextCommand {
             x: cursor_x,
-            y: cursor_y.saturating_add_signed(span.style.baseline_shift),
+            y: *cursor_y,
             width: span.width,
             text: display_text,
             font_size_mpx: span.style.font_size_mpx,
             line_height_px: line_height,
+            // The run's own baseline -- the line's, moved by any lift -- less
+            // the depth the painter hangs its letters from.
+            glyph_dy: (baseline_lu + i64::from(span.style.baseline_shift_lu) + px / 2)
+                .div_euclid(px) as i32
+                - fonts.painted_ascent_px(span.style.font_size_mpx, span.style.font_family),
             font_family: span.style.font_family,
             color: apply_opacity(span.style.color, context.background_color, span_opacity),
             underline: span.style.underline,
@@ -7127,14 +7647,36 @@ fn emit_line_impl(
             }
         }
 
-        cursor_x = cursor_x.saturating_add(span.width);
+        cursor_x_lu += span_width_lu;
     }
+    // An element that opens after the last run on the line and closes on a
+    // later one starts on the next line, not at the end of this one: in
+    // `long text <span>wrapped</span>` broken before "wrapped", the span's
+    // box is on the second line. Opened here it reached back to the end of
+    // the first and its box spanned both.
+    let tail = line.spans.len();
+    let carried: Vec<(usize, usize, u32, bool)> = line
+        .markers
+        .iter()
+        .filter(|(at, _, node_id, open)| {
+            *at == tail
+                && *open
+                && !line
+                    .markers
+                    .iter()
+                    .any(|(a, _, n, o)| *a == tail && !*o && n == node_id)
+        })
+        .map(|(_, _, node_id, _)| (0, 0, *node_id, true))
+        .collect();
+    line.markers.retain(|(at, _, node_id, open)| {
+        !(*at == tail && *open && carried.iter().any(|(_, _, n, _)| n == node_id))
+    });
     // Marks that close after the last run on the line.
     apply_inline_marks(
         &line.markers,
         line.spans.len(),
         None,
-        cursor_x,
+        cursor_x_lu,
         *cursor_y,
         strut_content,
         fonts,
@@ -7142,9 +7684,9 @@ fn emit_line_impl(
         context,
     );
 
-    *cursor_y = cursor_y.saturating_add(line_height);
+    advance_exact(cursor_y, line_height_lu, context);
     line.spans.clear();
-    line.markers.clear();
+    line.markers = carried;
     line.width = 0;
     line.line_height = 0;
 }
@@ -7175,7 +7717,7 @@ fn is_hidden(node: &StyledNode) -> bool {
 }
 
 fn char_width(style: &ComputedStyle, character: char, fonts: &mut FontContext) -> u32 {
-    fonts.glyph_advance_px(character, style.font_size_mpx, style.font_family)
+    fonts.glyph_advance_px(character, style.font_size_mpx, style.font_family, style.font_weight)
 }
 
 /// Where an inline box's own baseline sits, measured from its top.
@@ -7208,11 +7750,47 @@ fn below_baseline(style: &ComputedStyle, fonts: &mut FontContext) -> u32 {
     let descent = fonts.descent_px(font_size, style.font_family);
     let content = fonts.line_height_px(font_size, style.font_family);
     let line_height = if style.line_height > 0 {
-        line_height_from_ratio(font_size, style.line_height)
+        style_line_height_px(style)
     } else {
         content
     };
     line_height.saturating_sub(content) / 2 + descent
+}
+
+/// How far a run of text reaches above and below the baseline, in 64ths of a
+/// pixel, once its `line-height` is spread around its letters.
+///
+/// The way Chrome builds it: the face's ascent and descent each rounded to a
+/// whole pixel, the leading being `line-height` minus their sum, and the half
+/// of the leading that goes above the letters floored to a whole pixel -- the
+/// rest goes below. Negative leading is split the same way, so a line shorter
+/// than its letters has them overhanging it on both sides. `line-height:
+/// 10px` beside a 22px run gives a 12px line with the run's top 8px above the
+/// line's, which is what Chrome reports; spreading it by halving whole
+/// pixels towards zero gave 11 and a run pinned to the top of its line.
+fn text_extent_lu(style: &ComputedStyle, fonts: &mut FontContext) -> (i64, i64) {
+    let px = LU_PER_PX;
+    let (ascent, descent) =
+        fonts.rounded_ascent_descent_px(style.font_size_mpx, style.font_family);
+    let line_height = text_line_height_lu(style, fonts);
+    let leading = line_height - i64::from(ascent + descent) * px;
+    // Halved towards zero, as a LayoutUnit divides, then floored to a pixel.
+    let above_leading = (leading / 2).div_euclid(px) * px;
+    let below_leading = leading - above_leading;
+    (
+        i64::from(ascent) * px + above_leading,
+        i64::from(descent) * px + below_leading,
+    )
+}
+
+/// A stated `line-height` in whole pixels: the length itself where one was
+/// given, otherwise the ratio times the font size.
+fn style_line_height_px(style: &ComputedStyle) -> u32 {
+    if style.line_height_fixed_mpx > 0 {
+        crate::css::mpx_to_px(style.line_height_fixed_mpx)
+    } else {
+        line_height_from_ratio(style.font_size_mpx, style.line_height)
+    }
 }
 
 /// `line-height` as a whole number of pixels: a font size in `css::MPX`ths of
@@ -7263,16 +7841,51 @@ fn text_content_height(style: &ComputedStyle, fonts: &mut FontContext) -> u32 {
     fonts.content_height_px(style.font_size_mpx, style.font_family)
 }
 
+/// The line height in 64ths of a pixel, floored the way Chrome stores it:
+/// `1.15` at 16px is 18.4px, kept as 18.390625. Twenty of them are 367.8, which
+/// is where Chrome puts the twenty-first line -- 18.4 exactly would be 368.
+fn text_line_height_lu(style: &ComputedStyle, fonts: &mut FontContext) -> i64 {
+    if style.line_height_fixed_mpx > 0 {
+        i64::from(style.line_height_fixed_mpx) * LU_PER_PX / i64::from(crate::css::MPX)
+    } else if style.line_height > 0 {
+        let scale = 1000 * i64::from(crate::css::MPX);
+        i64::from(style.font_size_mpx) * i64::from(style.line_height) * LU_PER_PX / scale
+    } else {
+        // `normal` is the face's own parts rounded apart and added, which is a
+        // whole number of pixels already.
+        i64::from(fonts.line_height_px(style.font_size_mpx, style.font_family)) * LU_PER_PX
+    }
+}
+
 fn text_line_height(style: &ComputedStyle, fonts: &mut FontContext) -> u32 {
     if style.line_height > 0 {
-        line_height_from_ratio(style.font_size_mpx, style.line_height)
+        style_line_height_px(style)
     } else {
         fonts.line_height_px(style.font_size_mpx, style.font_family)
     }
 }
 
+/// A run's advance in 64ths of a pixel. Text is measured exactly, letters and
+/// letter-spacing, from what it says -- not from `span.width`, which is the
+/// sum of its words each rounded as the line was filled (37 + 4 + 48 for
+/// "inline nested", which is 89.84 laid end to end). Boxes, images and
+/// controls step by their width, which is whole pixels already.
+fn span_exact_width_lu(span: &LineSpan, fonts: &mut FontContext) -> i64 {
+    if span.control.is_some() || span.image.is_some() || span.atomic.is_some() {
+        return i64::from(span.width) * LU_PER_PX;
+    }
+    text_width_lu(&span.style, &span.text, fonts)
+}
+
+/// [`text_width`] in 64ths of a pixel, unrounded.
+fn text_width_lu(style: &ComputedStyle, text: &str, fonts: &mut FontContext) -> i64 {
+    let letters = fonts.text_width_lu(text, style.font_size_mpx, style.font_family, style.font_weight);
+    let spacing = i64::from(style.letter_spacing) * text.chars().count() as i64 * LU_PER_PX;
+    (letters + spacing).max(0)
+}
+
 fn text_width(style: &ComputedStyle, text: &str, fonts: &mut FontContext) -> u32 {
-    let base = fonts.text_width_px(text, style.font_size_mpx, style.font_family);
+    let base = fonts.text_width_px(text, style.font_size_mpx, style.font_family, style.font_weight);
     let char_count = text.chars().count() as i32;
     let spacing = style.letter_spacing as i32 * char_count;
     if spacing >= 0 {
@@ -13101,6 +13714,191 @@ mod tests {
             l.texts().into_iter().any(|text| text.x >= 100),
             "the line beside the float should start past it"
         );
+    }
+
+    #[test]
+    fn superscripts_and_subscripts_open_the_line_as_chrome_does() {
+        // Checked against Chrome (`tools/geom/sup.html`): a superscript lifted
+        // a third of the 16px and a pixel makes its line 22.33px, a subscript
+        // dropped a fifth and a pixel makes it 21.19. The lift was 33% in
+        // whole pixels and the drop half of that, for 21 and 19.
+        let l = probe_layout(
+            r#"<html><body style="font:16px Arial">
+                <div style="background:#aa0001">x<sup>2</sup>y</div>
+                <div style="background:#aa0002">x<sub>2</sub>y</div>
+                <div style="background:#aa0003">x<span style="vertical-align:super">2</span>y</div>
+            </body></html>"#,
+            800,
+        );
+        assert_eq!(probe_rect(&l, 0xAA0002).expect("sub line").y, 22);
+        assert_eq!(probe_rect(&l, 0xAA0003).expect("super line").y, 44);
+    }
+
+    #[test]
+    fn runs_on_a_line_are_placed_by_their_exact_widths() {
+        // "inline " is 41.81px of 16px Arial; Chrome puts the next run at
+        // 41.81, which a page reads as 42. Adding the words rounded one by
+        // one (37 + 4) put it at 41.
+        let l = probe_layout(
+            r#"<html><body style="font:16px Arial">
+                <div>inline <span data-tobira-node-id="990">nested</span></div>
+            </body></html>"#,
+            800,
+        );
+        let hitbox = l
+            .element_hitboxes
+            .iter()
+            .find(|hitbox| hitbox.node_id == 990)
+            .expect("the span's box");
+        assert_eq!((hitbox.x, hitbox.width), (42, 48));
+    }
+
+    #[test]
+    fn collapsed_cells_share_the_lines_between_them() {
+        // Checked against Chrome (`tools/geom/collapse.html`): two rows of
+        // 1px-bordered cells with 2px padding make a 47px table, the first
+        // cell reported half a line in (0.5 → 1) and 133 wide. Each cell
+        // keeping both its borders made the table 48 and the cell 0,0 134x24.
+        let l = probe_layout(
+            r#"<html><body style="margin:0;font:16px Arial">
+                <table data-tobira-node-id="996" style="border-collapse:collapse;width:400px">
+                <tr><td data-tobira-node-id="997" style="border:1px solid #000;padding:2px">a</td>
+                <td colspan="2" style="border:1px solid #000;padding:2px">b</td></tr>
+                <tr><td style="border:1px solid #000;padding:2px">c</td>
+                <td style="border:1px solid #000;padding:2px">d</td>
+                <td style="border:1px solid #000;padding:2px">e</td></tr></table>
+            </body></html>"#,
+            800,
+        );
+        let hitbox = |id: usize| {
+            let hitbox = l
+                .element_hitboxes
+                .iter()
+                .find(|hitbox| hitbox.node_id == id)
+                .expect("the box");
+            (hitbox.x, hitbox.y, hitbox.width, hitbox.height)
+        };
+        assert_eq!(hitbox(996), (0, 0, 400, 47));
+        assert_eq!(hitbox(997), (1, 1, 133, 23));
+    }
+
+    #[test]
+    fn a_wider_table_border_takes_the_outer_lines() {
+        // A 4px table border round 1px cells: Chrome makes the cells 24 tall
+        // (half of 4, a pixel of padding, 18 of text, and back) and the
+        // table 28.
+        let l = probe_layout(
+            r#"<html><body style="margin:0;font:16px Arial">
+                <table data-tobira-node-id="998" style="border-collapse:collapse;border:4px solid red">
+                <tr><td data-tobira-node-id="999" style="border:1px solid #000">a</td>
+                <td style="border:1px solid #000">b</td></tr></table>
+            </body></html>"#,
+            800,
+        );
+        let hitbox = |id: usize| {
+            let hitbox = l
+                .element_hitboxes
+                .iter()
+                .find(|hitbox| hitbox.node_id == id)
+                .expect("the box");
+            (hitbox.y, hitbox.height)
+        };
+        assert_eq!(hitbox(998), (0, 28));
+        assert_eq!(hitbox(999), (2, 24));
+    }
+
+    #[test]
+    fn a_space_belongs_to_the_element_it_was_written_in() {
+        // Checked against Chrome (`tools/geom/wsown.html`). A space at the
+        // end of a span is inside it; one at the start of a span after a
+        // space already written collapses away; and a span holding only a
+        // space keeps it.
+        let l = probe_layout(
+            r#"<html><body style="font:16px Arial">
+                <div>three <span data-tobira-node-id="992">trail </span>four</div>
+                <div>one <span data-tobira-node-id="993"> lead</span> two</div>
+                <div>x<span data-tobira-node-id="994"> </span>y</div>
+            </body></html>"#,
+            800,
+        );
+        let hitbox = |id: usize| {
+            let hitbox = l
+                .element_hitboxes
+                .iter()
+                .find(|hitbox| hitbox.node_id == id)
+                .expect("the span's box");
+            (hitbox.x, hitbox.width)
+        };
+        assert_eq!(hitbox(992), (41, 30));
+        assert_eq!(hitbox(993), (31, 30));
+        assert_eq!(hitbox(994), (8, 4));
+    }
+
+    #[test]
+    fn an_element_opened_where_a_line_breaks_starts_on_the_next_line() {
+        let l = probe_layout(
+            r#"<html><body style="font:16px Arial">
+                <div style="width:120px">word word <span data-tobira-node-id="995">across two</span> lines</div>
+            </body></html>"#,
+            800,
+        );
+        let hitbox = l
+            .element_hitboxes
+            .iter()
+            .find(|hitbox| hitbox.node_id == 995)
+            .expect("the span's box");
+        assert_eq!((hitbox.x, hitbox.width), (0, 76));
+    }
+
+    #[test]
+    fn bold_runs_are_measured_with_the_bold_cut() {
+        // Checked against Chrome (`tools/geom/g4.html`): "bold " in 16px
+        // Arial Bold is 38.2px, so the next run starts at 38. Measured with
+        // the regular cut's advances it started at 35.
+        let l = probe_layout(
+            r#"<html><body style="font:16px Arial">
+                <div><b>bold</b> <span data-tobira-node-id="991">y</span></div>
+            </body></html>"#,
+            800,
+        );
+        let hitbox = l
+            .element_hitboxes
+            .iter()
+            .find(|hitbox| hitbox.node_id == 991)
+            .expect("the span's box");
+        assert_eq!(hitbox.x, 38);
+    }
+
+    #[test]
+    fn fractional_line_heights_do_not_drift() {
+        // Checked against Chrome (`tools/geom/drift.html`): twenty
+        // `line-height: 1.15` paragraphs at 16px stand 18.390625px apart --
+        // the 18.4 floored to Chrome's 64ths -- so the twentieth starts at
+        // 349. Adding each line rounded to 18 put it at 342.
+        let mut html = String::from(r#"<html><body style="font-size:16px">"#);
+        for i in 1..=20 {
+            html.push_str(&format!(r#"<p style="background:#aa{i:04x}">line</p>"#));
+        }
+        html.push_str("</body></html>");
+        let l = probe_layout_with_css(&html, "p { margin: 0; line-height: 1.15 }", 800);
+        assert_eq!(probe_rect(&l, 0xAA0005).expect("p5").y, 74);
+        assert_eq!(probe_rect(&l, 0xAA000F).expect("p15").y, 257);
+        assert_eq!(probe_rect(&l, 0xAA0014).expect("p20").y, 349);
+    }
+
+    #[test]
+    fn a_line_height_length_is_inherited_as_a_length() {
+        // `line-height: 40px` is 40px for every descendant, whatever its font
+        // size. It was inherited as a ratio of the 16px it was written beside,
+        // so a 32px span inside made its line 80px; Chrome makes it 46.
+        let l = probe_layout(
+            r#"<html><body style="margin:0;font-size:16px">
+                <div style="background:#aa0001;line-height:40px">a <span style="font-size:32px">BIG</span> b</div>
+            </body></html>"#,
+            800,
+        );
+        let height = probe_rect(&l, 0xAA0001).expect("line").height;
+        assert!((40..=50).contains(&height), "line was {height}px tall");
     }
 
     #[test]
