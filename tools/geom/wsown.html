@@ -1,0 +1,12 @@
+<html><head><style>body{margin:0;font:16px Arial;width:600px}span{background:#f80}em{background:#08f}#w{width:120px}</style></head><body>
+<div>inline <span id="a">nested</span> after</div>
+<div>one <span id="b"> lead</span> two</div>
+<div>three <span id="c">trail </span>four</div>
+<div><span id="d">a</span> <em id="e">b</em> c</div>
+<div>x<span id="f"> </span>y <em id="g">z</em></div>
+<div id="w">some words here <span id="h">wrapped</span> tail</div>
+<div id="w">word word <span id="i">across two</span> lines</div>
+<pre id="out"></pre>
+<script>
+document.getElementById('out').textContent='a b c d e f g h i'.split(' ').map(function(id){var r=document.getElementById(id).getBoundingClientRect();return id+' '+Math.round(r.x)+','+Math.round(r.y)+' '+Math.round(r.width)+'x'+Math.round(r.height);}).join('\n');
+</script></body></html>

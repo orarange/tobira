@@ -1016,6 +1016,36 @@ struct LineBuilder {
     line_height: u32,
 }
 
+/// A collapsible space at the end of a run, held back until something
+/// follows it on the same line: a space at the end of a line is not part of
+/// it.
+#[derive(Clone)]
+struct OwedSpace {
+    /// The run the space was written in, which is the element it belongs to.
+    style: Arc<ComputedStyle>,
+    link_href: Option<String>,
+    link_node_id: Option<usize>,
+    /// How many marks the line held when it was written. Marks noted since
+    /// stand after it.
+    marks_before: usize,
+}
+
+impl OwedSpace {
+    fn new(
+        style: &Arc<ComputedStyle>,
+        link_href: Option<&str>,
+        link_node_id: Option<usize>,
+        line: &LineBuilder,
+    ) -> Self {
+        Self {
+            style: style.clone(),
+            link_href: link_href.map(str::to_string),
+            link_node_id,
+            marks_before: line.markers.len(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct FormContext {
     id: usize,
@@ -1167,13 +1197,30 @@ impl LineBuilder {
     ///
     /// Reuses whatever style the line already holds so that a space does not
     /// copy a `ComputedStyle` -- 520 bytes -- of its own.
-    fn push_space(&mut self, container_style: &ComputedStyle, fonts: &mut FontContext) {
-        let style = self
-            .spans
-            .last()
-            .map(|span| span.style.clone())
-            .unwrap_or_else(|| Arc::new(container_style.clone()));
-        self.push_span(" ", &style, fonts, None, None);
+    /// Write a space that was held back at the end of a run, now that
+    /// something follows it on the line.
+    ///
+    /// It is written in the style of the run it was in, and in front of every
+    /// mark noted since: in `three <span>trail </span>four` the space is
+    /// inside the span and the span closes after it. Written in the style of
+    /// whatever came next and behind the marks, it fell outside the element
+    /// that held it -- the span's background stopped short of it -- and inside
+    /// the next one.
+    fn push_owed_space(&mut self, owed: &OwedSpace, fonts: &mut FontContext) {
+        let later: Vec<_> = self
+            .markers
+            .drain(owed.marks_before.min(self.markers.len())..)
+            .collect();
+        self.push_span(
+            " ",
+            &owed.style,
+            fonts,
+            owed.link_href.as_deref(),
+            owed.link_node_id,
+        );
+        let at = self.spans.len();
+        self.markers
+            .extend(later.into_iter().map(|(_, _, node_id, open)| (at, 0, node_id, open)));
     }
 
     /// Note that an inline element begins or ends here.
@@ -5852,7 +5899,7 @@ fn layout_nowrap_fragments(
 ) {
     let mut line = LineBuilder::default();
     let text_indent = container_style.text_indent;
-    let mut pending_space = false;
+    let mut pending_space: Option<OwedSpace> = None;
 
     for fragment in fragments {
         match fragment {
@@ -5861,33 +5908,30 @@ fn layout_nowrap_fragments(
                 // same as it is before an image. Dropped, `text <span>` came
                 // out four pixels narrower than the page asked for and
                 // everything after it on the line moved left.
-                if pending_space && !line.is_empty() {
-                    line.push_span(" ", &atomic.style, fonts, None, None);
+                if let Some(owed) = pending_space.take()
+                    && !line.is_empty()
+                {
+                    line.push_owed_space(&owed, fonts);
                 }
                 line.push_atomic(atomic.clone(), container_style);
-                pending_space = false;
             }
             // Zero width, drawn as nothing: it only says where an inline
             // element begins or ends on this line. A space still owed from
-            // the run before is written first, so it belongs to whatever the
-            // element was written beside rather than to the element itself.
-            InlineFragment::BoxStart(node_id) => {
-                if pending_space && !line.is_empty() {
-                    line.push_space(container_style, fonts);
-                    pending_space = false;
-                }
-                line.push_marker(*node_id, true);
-            }
+            // the run before is written in front of it when something
+            // follows (`push_owed_space`).
+            InlineFragment::BoxStart(node_id) => line.push_marker(*node_id, true),
             InlineFragment::BoxEnd(node_id) => line.push_marker(*node_id, false),
             InlineFragment::LineBreak => {
                 // nowrap: ignore line breaks
             }
             InlineFragment::Control(control) => {
-                if pending_space && !line.is_empty() {
-                    line.push_span(" ", &control.style, fonts, None, None);
+                if let Some(owed) = pending_space.take()
+                    && !line.is_empty()
+                {
+                    line.push_owed_space(&owed, fonts);
                 }
                 line.push_control(control, fonts);
-                pending_space = true;
+                pending_space = Some(OwedSpace::new(&control.style, None, None, &line));
             }
             InlineFragment::Image {
                 src,
@@ -5897,8 +5941,10 @@ fn layout_nowrap_fragments(
                 link_href,
                 link_node_id,
             } => {
-                if pending_space && !line.is_empty() {
-                    line.push_span(" ", style, fonts, link_href.as_deref(), *link_node_id);
+                if let Some(owed) = pending_space.take()
+                    && !line.is_empty()
+                {
+                    line.push_owed_space(&owed, fonts);
                 }
                 line.push_image(
                     src,
@@ -5909,7 +5955,12 @@ fn layout_nowrap_fragments(
                     *link_node_id,
                     fonts,
                 );
-                pending_space = true;
+                pending_space = Some(OwedSpace::new(
+                    style,
+                    link_href.as_deref(),
+                    *link_node_id,
+                    &line,
+                ));
             }
             InlineFragment::Text {
                 text,
@@ -5922,25 +5973,33 @@ fn layout_nowrap_fragments(
                     .next()
                     .map(char::is_whitespace)
                     .unwrap_or(false);
-                let ends_with_whitespace = text
-                    .chars()
-                    .last()
-                    .map(char::is_whitespace)
-                    .unwrap_or(false);
                 let words = line_break_segments(text);
-                let mut needs_space = pending_space || starts_with_whitespace;
+                let mut needs_space = pending_space.is_some() || starts_with_whitespace;
+                let mut wrote_words = false;
                 for (index, (word, space_before)) in words.into_iter().enumerate() {
+                    let owed = if index == 0 { pending_space.take() } else { None };
                     if index > 0 {
                         needs_space = space_before;
                     }
                     if needs_space && !line.is_empty() {
-                        line.push_span(" ", style, fonts, link_href.as_deref(), *link_node_id);
+                        let owed = owed.unwrap_or_else(|| {
+                            OwedSpace::new(style, link_href.as_deref(), *link_node_id, &line)
+                        });
+                        line.push_owed_space(&owed, fonts);
                     }
                     line.push_span(word, style, fonts, link_href.as_deref(), *link_node_id);
                     needs_space = true;
+                    wrote_words = true;
                 }
-                pending_space = ends_with_whitespace
-                    || (text.chars().any(char::is_whitespace) && line.is_empty());
+                pending_space = owed_after_text(
+                    text,
+                    wrote_words,
+                    pending_space,
+                    style,
+                    link_href.as_deref(),
+                    *link_node_id,
+                    &line,
+                );
             }
         }
     }
@@ -5965,6 +6024,34 @@ fn layout_nowrap_fragments(
 /// question as simple as "how many lines would this be?" has to be asked by
 /// doing the work and then undoing it. Only text runs are ever tried this way,
 /// so nothing but those three lists and the cursor can have moved.
+/// What space a text run leaves owing to whatever follows it.
+///
+/// A run that wrote words owes the space it ends with, in its own style. One
+/// that is nothing but white space adds nothing to a space already owed --
+/// the first of a row of collapsible spaces is the one kept, so in
+/// `a <span> </span>b` the space is the one after `a`, outside the span --
+/// and otherwise owes its own.
+fn owed_after_text(
+    text: &str,
+    wrote_words: bool,
+    owed: Option<OwedSpace>,
+    style: &Arc<ComputedStyle>,
+    link_href: Option<&str>,
+    link_node_id: Option<usize>,
+    line: &LineBuilder,
+) -> Option<OwedSpace> {
+    let ends_with_whitespace = text.chars().last().is_some_and(char::is_whitespace);
+    if wrote_words {
+        return ends_with_whitespace
+            .then(|| OwedSpace::new(style, link_href, link_node_id, line));
+    }
+    owed.or_else(|| {
+        text.chars()
+            .any(char::is_whitespace)
+            .then(|| OwedSpace::new(style, link_href, link_node_id, line))
+    })
+}
+
 fn trial_line_count(
     fragments: &[InlineFragment],
     container_style: &ComputedStyle,
@@ -6123,7 +6210,7 @@ fn layout_normal_fragments_at(
     let ellipsis_mode =
         container_style.text_overflow_ellipsis && container_style.overflow == Overflow::Hidden;
     let mut line = LineBuilder::default();
-    let mut pending_space = false;
+    let mut pending_space: Option<OwedSpace> = None;
     let text_indent = container_style.text_indent;
     let mut first_line = true;
     let mut ellipsis_done = false; // in ellipsis mode, once we clip, we're done
@@ -6134,23 +6221,18 @@ fn layout_normal_fragments_at(
         }
         match fragment {
             InlineFragment::Atomic(atomic) => {
-                if pending_space && !line.is_empty() {
-                    line.push_span(" ", &atomic.style, fonts, None, None);
+                if let Some(owed) = pending_space.take()
+                    && !line.is_empty()
+                {
+                    line.push_owed_space(&owed, fonts);
                 }
                 line.push_atomic(atomic.clone(), container_style);
-                pending_space = false;
             }
             // Zero width, drawn as nothing: it only says where an inline
             // element begins or ends on this line. A space still owed from
-            // the run before is written first, so it belongs to whatever the
-            // element was written beside rather than to the element itself.
-            InlineFragment::BoxStart(node_id) => {
-                if pending_space && !line.is_empty() {
-                    line.push_space(container_style, fonts);
-                    pending_space = false;
-                }
-                line.push_marker(*node_id, true);
-            }
+            // the run before is written in front of it when something
+            // follows (`push_owed_space`).
+            InlineFragment::BoxStart(node_id) => line.push_marker(*node_id, true),
             InlineFragment::BoxEnd(node_id) => line.push_marker(*node_id, false),
             InlineFragment::LineBreak => {
                 if ellipsis_mode {
@@ -6167,7 +6249,7 @@ fn layout_normal_fragments_at(
                         if first_line { text_indent } else { 0 },
                     );
                     first_line = false;
-                    pending_space = false;
+                    pending_space = None;
                 }
             }
             InlineFragment::Control(control) => {
@@ -6178,9 +6260,10 @@ fn layout_normal_fragments_at(
                     width
                 };
 
-                let pending_space_before_control = pending_space && !line.is_empty();
-                if pending_space_before_control {
-                    let space_width = char_width(&control.style, ' ', fonts);
+                if let Some(owed) = pending_space.take()
+                    && !line.is_empty()
+                {
+                    let space_width = char_width(&owed.style, ' ', fonts);
                     if line.width.saturating_add(space_width) > effective_width {
                         if ellipsis_mode {
                             // Apply ellipsis and stop
@@ -6205,7 +6288,7 @@ fn layout_normal_fragments_at(
                         );
                         first_line = false;
                     } else {
-                        line.push_span(" ", &control.style, fonts, None, None);
+                        line.push_owed_space(&owed, fonts);
                     }
                 }
 
@@ -6233,7 +6316,7 @@ fn layout_normal_fragments_at(
                     first_line = false;
                 }
                 line.push_control(control, fonts);
-                pending_space = true;
+                pending_space = Some(OwedSpace::new(&control.style, None, None, &line));
             }
             InlineFragment::Image {
                 src,
@@ -6249,8 +6332,10 @@ fn layout_normal_fragments_at(
                     width
                 };
 
-                if pending_space && !line.is_empty() {
-                    let space_width = char_width(style, ' ', fonts);
+                if let Some(owed) = pending_space.take()
+                    && !line.is_empty()
+                {
+                    let space_width = char_width(&owed.style, ' ', fonts);
                     if line.width.saturating_add(space_width) > effective_width {
                         if ellipsis_mode {
                             apply_ellipsis_to_line(
@@ -6274,7 +6359,7 @@ fn layout_normal_fragments_at(
                         );
                         first_line = false;
                     } else {
-                        line.push_span(" ", style, fonts, link_href.as_deref(), *link_node_id);
+                        line.push_owed_space(&owed, fonts);
                     }
                 }
 
@@ -6310,7 +6395,12 @@ fn layout_normal_fragments_at(
                     *link_node_id,
                     fonts,
                 );
-                pending_space = true;
+                pending_space = Some(OwedSpace::new(
+                    style,
+                    link_href.as_deref(),
+                    *link_node_id,
+                    &line,
+                ));
             }
             InlineFragment::Text {
                 text,
@@ -6323,15 +6413,12 @@ fn layout_normal_fragments_at(
                     .next()
                     .map(char::is_whitespace)
                     .unwrap_or(false);
-                let ends_with_whitespace = text
-                    .chars()
-                    .last()
-                    .map(char::is_whitespace)
-                    .unwrap_or(false);
                 let words = line_break_segments(text);
-                let mut needs_space = pending_space || starts_with_whitespace;
+                let mut needs_space = pending_space.is_some() || starts_with_whitespace;
+                let mut wrote_words = false;
 
                 for (index, (word, space_before)) in words.into_iter().enumerate() {
+                    let owed = if index == 0 { pending_space.take() } else { None };
                     if index > 0 {
                         needs_space = space_before;
                     }
@@ -6345,7 +6432,10 @@ fn layout_normal_fragments_at(
                     };
 
                     if needs_space && !line.is_empty() {
-                        let space_width = char_width(style, ' ', fonts);
+                        let owed = owed.unwrap_or_else(|| {
+                            OwedSpace::new(style, link_href.as_deref(), *link_node_id, &line)
+                        });
+                        let space_width = char_width(&owed.style, ' ', fonts);
                         if line.width.saturating_add(space_width) > effective_width {
                             if ellipsis_mode {
                                 apply_ellipsis_to_line(
@@ -6369,13 +6459,14 @@ fn layout_normal_fragments_at(
                             );
                             first_line = false;
                         } else {
-                            line.push_span(" ", style, fonts, link_href.as_deref(), *link_node_id);
+                            line.push_owed_space(&owed, fonts);
                         }
                     }
 
                     if ellipsis_done {
                         break;
                     }
+                    wrote_words = true;
 
                     let effective_width2 = if first_line && line.is_empty() {
                         width_after_indent(width, text_indent)
@@ -6428,8 +6519,15 @@ fn layout_normal_fragments_at(
                     }
                 }
 
-                pending_space = ends_with_whitespace
-                    || (text.chars().any(char::is_whitespace) && line.is_empty());
+                pending_space = owed_after_text(
+                    text,
+                    wrote_words,
+                    pending_space,
+                    style,
+                    link_href.as_deref(),
+                    *link_node_id,
+                    &line,
+                );
             }
         }
     }
@@ -7247,6 +7345,28 @@ fn emit_line_impl(
 
         cursor_x_lu += span_width_lu;
     }
+    // An element that opens after the last run on the line and closes on a
+    // later one starts on the next line, not at the end of this one: in
+    // `long text <span>wrapped</span>` broken before "wrapped", the span's
+    // box is on the second line. Opened here it reached back to the end of
+    // the first and its box spanned both.
+    let tail = line.spans.len();
+    let carried: Vec<(usize, usize, u32, bool)> = line
+        .markers
+        .iter()
+        .filter(|(at, _, node_id, open)| {
+            *at == tail
+                && *open
+                && !line
+                    .markers
+                    .iter()
+                    .any(|(a, _, n, o)| *a == tail && !*o && n == node_id)
+        })
+        .map(|(_, _, node_id, _)| (0, 0, *node_id, true))
+        .collect();
+    line.markers.retain(|(at, _, node_id, open)| {
+        !(*at == tail && *open && carried.iter().any(|(_, _, n, _)| n == node_id))
+    });
     // Marks that close after the last run on the line.
     apply_inline_marks(
         &line.markers,
@@ -7262,7 +7382,7 @@ fn emit_line_impl(
 
     advance_exact(cursor_y, line_height_lu, context);
     line.spans.clear();
-    line.markers.clear();
+    line.markers = carried;
     line.width = 0;
     line.line_height = 0;
 }
@@ -13327,6 +13447,49 @@ mod tests {
             .find(|hitbox| hitbox.node_id == 990)
             .expect("the span's box");
         assert_eq!((hitbox.x, hitbox.width), (42, 48));
+    }
+
+    #[test]
+    fn a_space_belongs_to_the_element_it_was_written_in() {
+        // Checked against Chrome (`tools/geom/wsown.html`). A space at the
+        // end of a span is inside it; one at the start of a span after a
+        // space already written collapses away; and a span holding only a
+        // space keeps it.
+        let l = probe_layout(
+            r#"<html><body style="font:16px Arial">
+                <div>three <span data-tobira-node-id="992">trail </span>four</div>
+                <div>one <span data-tobira-node-id="993"> lead</span> two</div>
+                <div>x<span data-tobira-node-id="994"> </span>y</div>
+            </body></html>"#,
+            800,
+        );
+        let hitbox = |id: usize| {
+            let hitbox = l
+                .element_hitboxes
+                .iter()
+                .find(|hitbox| hitbox.node_id == id)
+                .expect("the span's box");
+            (hitbox.x, hitbox.width)
+        };
+        assert_eq!(hitbox(992), (41, 30));
+        assert_eq!(hitbox(993), (31, 30));
+        assert_eq!(hitbox(994), (8, 4));
+    }
+
+    #[test]
+    fn an_element_opened_where_a_line_breaks_starts_on_the_next_line() {
+        let l = probe_layout(
+            r#"<html><body style="font:16px Arial">
+                <div style="width:120px">word word <span data-tobira-node-id="995">across two</span> lines</div>
+            </body></html>"#,
+            800,
+        );
+        let hitbox = l
+            .element_hitboxes
+            .iter()
+            .find(|hitbox| hitbox.node_id == 995)
+            .expect("the span's box");
+        assert_eq!((hitbox.x, hitbox.width), (0, 76));
     }
 
     #[test]

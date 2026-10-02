@@ -16,6 +16,7 @@ python tools/geom/cmp.py g4.html
 | `g2.html` | inline formatting, line breaking | 14/22 |
 | `g3.html` | inline-block baselines | 6/7 |
 | `g4.html` | inline element hitboxes | 14/14 |
+| `wsown.html` | which element a collapsible space belongs to | 8/9 |
 | `g5.html` | modern CSS (custom properties, logical props, clamp) | 23/26 |
 | `g6.html` | font-family name resolution | 10/12 |
 | `g6b.html` | which face each generic family resolves to | 17/32 |
