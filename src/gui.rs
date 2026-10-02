@@ -2720,7 +2720,7 @@ fn layout_error_document(
         commands.push(DrawCommand::Text(TextCommand {
             x: 0,
             y: cursor_y,
-            width: fonts.text_width_px(line, font_size_mpx, FontFamilyKind::Sans),
+            width: fonts.text_width_px(line, font_size_mpx, FontFamilyKind::Sans, false),
             text: line.clone(),
             font_size_mpx,
             line_height_px: height,
@@ -3216,7 +3216,7 @@ fn text_editor_view(
     let mut width: u32 = 0;
 
     while end < characters.len() {
-        let advance = fonts.glyph_advance_px(characters[end], font_size, font_family);
+        let advance = fonts.glyph_advance_px(characters[end], font_size, font_family, false);
         if width.saturating_add(advance) > available_width && end > start {
             break;
         }
@@ -3228,7 +3228,7 @@ fn text_editor_view(
     }
 
     while start > 0 {
-        let advance = fonts.glyph_advance_px(characters[start - 1], font_size, font_family);
+        let advance = fonts.glyph_advance_px(characters[start - 1], font_size, font_family, false);
         if width.saturating_add(advance) > available_width && end > start {
             break;
         }
@@ -3246,7 +3246,7 @@ fn text_editor_view(
     let text: String = characters[start..end].iter().collect();
     let caret_x = characters[start..cursor]
         .iter()
-        .map(|character| fonts.glyph_advance_px(*character, font_size, font_family))
+        .map(|character| fonts.glyph_advance_px(*character, font_size, font_family, false))
         .sum();
 
     let mut selection_start_x = None;
@@ -3258,13 +3258,13 @@ fn text_editor_view(
             selection_start_x = Some(
                 characters[start..visible_start]
                     .iter()
-                    .map(|character| fonts.glyph_advance_px(*character, font_size, font_family))
+                    .map(|character| fonts.glyph_advance_px(*character, font_size, font_family, false))
                     .sum(),
             );
             selection_end_x = Some(
                 characters[start..visible_end]
                     .iter()
-                    .map(|character| fonts.glyph_advance_px(*character, font_size, font_family))
+                    .map(|character| fonts.glyph_advance_px(*character, font_size, font_family, false))
                     .sum(),
             );
         }
@@ -3308,7 +3308,7 @@ fn cursor_index_for_text_x(
     let target_x = local_x.max(0.0) as u32;
 
     for (index, character) in characters.iter().enumerate() {
-        let advance = fonts.glyph_advance_px(*character, font_size, font_family);
+        let advance = fonts.glyph_advance_px(*character, font_size, font_family, false);
         let midpoint = cursor_x.saturating_add(advance / 2);
         if target_x < midpoint {
             return view.start_char + index;
@@ -3727,7 +3727,7 @@ fn paint_chrome(
         FontFamilyKind::Sans,
     );
 
-    let app_width = fonts.text_width_px("TOBIRA", APP_FONT_SIZE_MPX, FontFamilyKind::Sans);
+    let app_width = fonts.text_width_px("TOBIRA", APP_FONT_SIZE_MPX, FontFamilyKind::Sans, true);
 
     // Build badge right after the brand: the running revision is always on
     // screen, so verifying "is my patch in this build?" is a glance away even
@@ -3758,7 +3758,7 @@ fn paint_chrome(
         false,
         FontFamilyKind::Sans,
     );
-    let version_width = fonts.text_width_px(&version_badge, TITLE_FONT_SIZE_MPX, FontFamilyKind::Sans);
+    let version_width = fonts.text_width_px(&version_badge, TITLE_FONT_SIZE_MPX, FontFamilyKind::Sans, false);
 
     let page_title_x = version_x.saturating_add(version_width + TITLE_META_GAP);
     let page_title_max_width = chrome
@@ -3771,6 +3771,7 @@ fn paint_chrome(
         page_title_max_width,
         TITLE_FONT_SIZE_MPX,
         FontFamilyKind::Sans,
+        false,
     );
     if !page_title.is_empty() {
         let page_title_y = chrome.title_bar.y.saturating_add(
@@ -3987,7 +3988,7 @@ fn paint_chrome(
         "Enter go | Ctrl+L focus | Ctrl+A/C/X/V edit | scroll: {} / {} px",
         scroll_y, max_scroll_y
     );
-    let meta_right_width = fonts.text_width_px(&meta_right, INFO_FONT_SIZE_MPX, FontFamilyKind::Sans);
+    let meta_right_width = fonts.text_width_px(&meta_right, INFO_FONT_SIZE_MPX, FontFamilyKind::Sans, false);
     let meta_right_x = width
         .saturating_sub(FRAME_PADDING)
         .saturating_sub(meta_right_width);
@@ -4014,6 +4015,7 @@ fn paint_chrome(
         meta_left_max_width,
         INFO_FONT_SIZE_MPX,
         FontFamilyKind::Sans,
+        false,
     );
     fonts.draw_text(
         buffer,
@@ -4041,17 +4043,18 @@ fn fit_text_to_width(
     max_width: u32,
     font_size_mpx: u32,
     font_family: FontFamilyKind,
+    bold: bool,
 ) -> String {
     if max_width == 0 {
         return String::new();
     }
 
-    if fonts.text_width_px(text, font_size_mpx, font_family) <= max_width {
+    if fonts.text_width_px(text, font_size_mpx, font_family, bold) <= max_width {
         return text.to_string();
     }
 
     let ellipsis = "...";
-    let ellipsis_width = fonts.text_width_px(ellipsis, font_size_mpx, font_family);
+    let ellipsis_width = fonts.text_width_px(ellipsis, font_size_mpx, font_family, bold);
     if ellipsis_width >= max_width {
         return ellipsis.to_string();
     }
@@ -4059,7 +4062,7 @@ fn fit_text_to_width(
     let mut fitted = String::new();
     let mut current_width: u32 = 0;
     for character in text.chars() {
-        let advance = fonts.glyph_advance_px(character, font_size_mpx, font_family);
+        let advance = fonts.glyph_advance_px(character, font_size_mpx, font_family, bold);
         if current_width
             .saturating_add(advance)
             .saturating_add(ellipsis_width)
@@ -4122,7 +4125,7 @@ fn paint_button(
     );
 
     let font_size = if label.len() > 1 { 14 } else { 18 };
-    let text_width = fonts.text_width_px(label, font_size, FontFamilyKind::Sans);
+    let text_width = fonts.text_width_px(label, font_size, FontFamilyKind::Sans, true);
     let text_height = fonts.line_height_px(font_size, FontFamilyKind::Sans);
     let text_x = rect
         .x
@@ -4246,6 +4249,7 @@ fn paint_page_control(
                     available_width,
                     control.font_size_mpx,
                     control.font_family,
+                    false,
                 );
                 fonts.draw_text(
                     buffer,
@@ -4350,8 +4354,9 @@ fn paint_page_control(
                 control.width.saturating_sub(CONTROL_PADDING_X * 2),
                 control.font_size_mpx,
                 control.font_family,
+                true,
             );
-            let text_width = fonts.text_width_px(&label, control.font_size_mpx, control.font_family);
+            let text_width = fonts.text_width_px(&label, control.font_size_mpx, control.font_family, true);
             let line_height = fonts.line_height_px(control.font_size_mpx, control.font_family);
             let text_x = absolute_x.saturating_add(control.width.saturating_sub(text_width) / 2);
             let text_y = absolute_y.saturating_add(control.height.saturating_sub(line_height) / 2);
@@ -4379,6 +4384,7 @@ fn paint_page_control(
                     .saturating_sub(CONTROL_PADDING_X * 2 + SELECT_CHEVRON_WIDTH),
                 control.font_size_mpx,
                 control.font_family,
+                false,
             );
             let line_height = fonts.line_height_px(control.font_size_mpx, control.font_family);
             let text_y = absolute_y.saturating_add(control.height.saturating_sub(line_height) / 2);

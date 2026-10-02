@@ -730,8 +730,14 @@ receiver の own property 数 1 / 20 / 100 / 400 で回すと、O(幅) の処理
    ③ 空白と空の inline だけの塊は行を作らずに捨てとって、中の要素の箱も
    消えとった（`getBoundingClientRect` が 0,0）。捨てる前に 0x0 で登録。
    **残り（別件）**: g2 は表（`border-collapse` の枠の半分の配り方）で表以下が
-   全部 +1。g4 の `lnk` と `inlx` の `f` は**太字を普通の字幅で測っとる**
-   （font.rs が意図してそうしとる。Chrome は太字の advance）。それと
+   全部 +1。~~g4 の `lnk` と `inlx` の `f` は太字を普通の字幅で測っとる~~
+   → **2026-10-02 に直した（g4 14/14）**: 測る側（`glyph_advance_px` /
+   `text_width_px` / `text_width_lu`）に `bold` を渡し、描く側も太字の
+   advance で進める。ついでに**名前指定の書体（Arial 等）の太字が一度も
+   読まれとらんかった**のも直した（`rasterize_glyph` が bold の字体を
+   調べる前に `ensure_family_loaded(.., true)` を呼んどらんかった。Arial の
+   頁の太字は全部、普通の字を横に塗り広げた偽の太字やった）。名前指定の
+   書体に太字が無いときは今も偽の太字で、sans の太字には落ちん。それと
    **空白の持ち主**: `inline <span>nested</span>` の空白が span 側の run に
    入る（背景が空白まで塗られ、背景の矩形は 37 から）。Chrome は空白を
    それが書かれた要素に置く。
@@ -884,6 +890,14 @@ python tools/geom/cmp.py g4.html
 ```
 
 ## Session Log
+
+### 2026-10-02 - Claude (太字の字幅)
+
+- 太字を太字の advance で測って描くようにした。名前指定の書体の太字が
+  読まれず偽の太字になっとった不具合も一緒に直した。g4 13 → 14/14、
+  geom 全体 324 → 325/460（ほかは一つも変わらん）。検体
+  `tools/geom/boldw.html` を撮って Chrome と横位置が揃うのを確認。
+  テスト 1207 通過 / 4 落ち（前と同じ 4 本）、html5lib 1213/1229。
 
 ### 2026-09-28 - Claude (Linux の書体代替 + インライン矩形)
 

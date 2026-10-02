@@ -445,14 +445,11 @@ impl FontContext {
             }
             let cursor_x = cursor.round() as i32;
 
-            // Stepped by the regular cut's advance, not the bold one's. Layout
-            // measured this run before anything knew it would be drawn bold,
-            // and a wider step here would walk the text out of the box it was
-            // given.
-            let advance = self
-                .cached_glyph(character, font_size_mpx, font_family, false)
-                .advance;
+            // Stepped by the cut it is drawn in. Layout measures bold runs
+            // with the bold cut's advances as well, so the two agree; a face
+            // with no bold cut is smeared and keeps the regular advance.
             let glyph = self.cached_glyph(character, font_size_mpx, font_family, bold);
+            let advance = glyph.advance;
             let smear = glyph.synthetic_bold;
             draw_cached_glyph(buffer, width, height, cursor_x, y, glyph, color, clip_top);
 
@@ -492,7 +489,7 @@ impl FontContext {
                     height,
                     x.max(0) as u32,
                     underline_y as u32,
-                    self.text_width_px(text, font_size_mpx, font_family),
+                    self.text_width_px(text, font_size_mpx, font_family, bold),
                     (crate::css::mpx_to_px(font_size_mpx) / 12).max(1),
                     color,
                 );
@@ -509,7 +506,7 @@ impl FontContext {
                     height,
                     x.max(0) as u32,
                     line_through_y as u32,
-                    self.text_width_px(text, font_size_mpx, font_family),
+                    self.text_width_px(text, font_size_mpx, font_family, bold),
                     (crate::css::mpx_to_px(font_size_mpx) / 12).max(1),
                     color,
                 );
@@ -522,10 +519,13 @@ impl FontContext {
         character: char,
         font_size_mpx: u32,
         font_family: FontFamilyKind,
+        bold: bool,
     ) -> u32 {
-        // Measurement always uses the regular cut: layout is done before
-        // anything knows a run will be drawn bold, and the two have to agree.
-        self.cached_glyph(character, font_size_mpx, font_family, false)
+        // Measured in the cut it will be drawn in. Bold is wider: Arial Bold's
+        // advances run about a tenth past the regular's, and measuring a bold
+        // link with the regular cut put everything after it on the line short
+        // of where Chrome puts it.
+        self.cached_glyph(character, font_size_mpx, font_family, bold)
             .advance_px
     }
 
@@ -539,11 +539,12 @@ impl FontContext {
         text: &str,
         font_size_mpx: u32,
         font_family: FontFamilyKind,
+        bold: bool,
     ) -> u32 {
         let total: f32 = text
             .chars()
             .map(|character| {
-                self.cached_glyph(character, font_size_mpx, font_family, false)
+                self.cached_glyph(character, font_size_mpx, font_family, bold)
                     .advance
             })
             .sum();
@@ -558,11 +559,12 @@ impl FontContext {
         text: &str,
         font_size_mpx: u32,
         font_family: FontFamilyKind,
+        bold: bool,
     ) -> i64 {
         let total: f32 = text
             .chars()
             .map(|character| {
-                self.cached_glyph(character, font_size_mpx, font_family, false)
+                self.cached_glyph(character, font_size_mpx, font_family, bold)
                     .advance
             })
             .sum();
@@ -742,6 +744,12 @@ impl FontContext {
         // this character, drops through to the regular stack and is smeared.
         let mut synthetic_bold = bold;
         if bold {
+            // A named face's bold cut is only read when something asks for
+            // it, and `ensure_font_for` does not read named faces. Asked here
+            // first, or Arial Bold was never found: every bold run in a page
+            // that names Arial was the regular cut smeared, and measured with
+            // the regular cut's advances.
+            self.ensure_family_loaded(font_family, true);
             self.ensure_font_for(character, font_family, true);
             if self
                 .fonts_for(font_family, true)
@@ -1421,8 +1429,8 @@ mod tests {
     fn a_narrow_letter_is_narrower_than_a_wide_one_at_small_sizes() {
         let mut fonts = FontContext::load();
         for size in [8u32, 10, 12] {
-            let narrow = fonts.text_width_px("iiiiiiiiii", size, FontFamilyKind::Sans);
-            let wide = fonts.text_width_px("mmmmmmmmmm", size, FontFamilyKind::Sans);
+            let narrow = fonts.text_width_px("iiiiiiiiii", size, FontFamilyKind::Sans, false);
+            let wide = fonts.text_width_px("mmmmmmmmmm", size, FontFamilyKind::Sans, false);
             assert!(
                 narrow * 2 <= wide,
                 "at {size}px ten i's ({narrow}) should be well under ten m's ({wide})"
@@ -1436,8 +1444,8 @@ mod tests {
     fn a_run_grows_in_proportion_with_its_type() {
         let mut fonts = FontContext::load();
         let text = "Hamburgefonstiv";
-        let at_10 = fonts.text_width_px(text, 10 * MPX, FontFamilyKind::Sans) as f32;
-        let at_20 = fonts.text_width_px(text, 20 * MPX, FontFamilyKind::Sans) as f32;
+        let at_10 = fonts.text_width_px(text, 10 * MPX, FontFamilyKind::Sans, false) as f32;
+        let at_20 = fonts.text_width_px(text, 20 * MPX, FontFamilyKind::Sans, false) as f32;
         let ratio = at_20 / at_10;
         assert!(
             (ratio - 2.0).abs() < 0.15,
@@ -1466,8 +1474,8 @@ mod tests {
     fn invisible_characters_render_as_nothing() {
         let mut context = FontContext::load();
         for ch in ['\u{FE0F}', '\u{200B}', '\u{200D}', '\u{FEFF}'] {
-            let with = context.text_width_px(&format!("A{ch}B"), 18 * MPX, FontFamilyKind::Sans);
-            let without = context.text_width_px("AB", 18 * MPX, FontFamilyKind::Sans);
+            let with = context.text_width_px(&format!("A{ch}B"), 18 * MPX, FontFamilyKind::Sans, false);
+            let without = context.text_width_px("AB", 18 * MPX, FontFamilyKind::Sans, false);
             assert_eq!(
                 with, without,
                 "U+{:04X} should have zero advance",

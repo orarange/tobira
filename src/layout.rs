@@ -3169,7 +3169,7 @@ fn clip_text_to_box(
     let mut pen = text.x;
     let mut started = false;
     for character in text.text.chars() {
-        let advance = fonts.glyph_advance_px(character, text.font_size_mpx, text.font_family);
+        let advance = fonts.glyph_advance_px(character, text.font_size_mpx, text.font_family, text.bold);
         let next = pen.saturating_add(advance);
         // A glyph counts as visible only if it fits entirely inside the box:
         // the renderer draws whole glyphs, so a partly-covered one would spill.
@@ -3188,7 +3188,7 @@ fn clip_text_to_box(
     if kept.is_empty() {
         return None;
     }
-    let width = fonts.text_width_px(&kept, text.font_size_mpx, text.font_family);
+    let width = fonts.text_width_px(&kept, text.font_size_mpx, text.font_family, text.bold);
     Some(TextCommand {
         text: kept,
         x: kept_x,
@@ -6484,7 +6484,12 @@ fn apply_ellipsis_to_line(
                 let mut tw = 0u32;
                 for ch in span.text.chars() {
                     let cw =
-                        fonts.glyph_advance_px(ch, span.style.font_size_mpx, span.style.font_family);
+                        fonts.glyph_advance_px(
+                        ch,
+                        span.style.font_size_mpx,
+                        span.style.font_family,
+                        span.style.font_weight,
+                    );
                     if tw.saturating_add(cw) > available {
                         break;
                     }
@@ -7288,7 +7293,7 @@ fn is_hidden(node: &StyledNode) -> bool {
 }
 
 fn char_width(style: &ComputedStyle, character: char, fonts: &mut FontContext) -> u32 {
-    fonts.glyph_advance_px(character, style.font_size_mpx, style.font_family)
+    fonts.glyph_advance_px(character, style.font_size_mpx, style.font_family, style.font_weight)
 }
 
 /// Where an inline box's own baseline sits, measured from its top.
@@ -7450,13 +7455,13 @@ fn span_exact_width_lu(span: &LineSpan, fonts: &mut FontContext) -> i64 {
 
 /// [`text_width`] in 64ths of a pixel, unrounded.
 fn text_width_lu(style: &ComputedStyle, text: &str, fonts: &mut FontContext) -> i64 {
-    let letters = fonts.text_width_lu(text, style.font_size_mpx, style.font_family);
+    let letters = fonts.text_width_lu(text, style.font_size_mpx, style.font_family, style.font_weight);
     let spacing = i64::from(style.letter_spacing) * text.chars().count() as i64 * LU_PER_PX;
     (letters + spacing).max(0)
 }
 
 fn text_width(style: &ComputedStyle, text: &str, fonts: &mut FontContext) -> u32 {
-    let base = fonts.text_width_px(text, style.font_size_mpx, style.font_family);
+    let base = fonts.text_width_px(text, style.font_size_mpx, style.font_family, style.font_weight);
     let char_count = text.chars().count() as i32;
     let spacing = style.letter_spacing as i32 * char_count;
     if spacing >= 0 {
@@ -13322,6 +13327,25 @@ mod tests {
             .find(|hitbox| hitbox.node_id == 990)
             .expect("the span's box");
         assert_eq!((hitbox.x, hitbox.width), (42, 48));
+    }
+
+    #[test]
+    fn bold_runs_are_measured_with_the_bold_cut() {
+        // Checked against Chrome (`tools/geom/g4.html`): "bold " in 16px
+        // Arial Bold is 38.2px, so the next run starts at 38. Measured with
+        // the regular cut's advances it started at 35.
+        let l = probe_layout(
+            r#"<html><body style="font:16px Arial">
+                <div><b>bold</b> <span data-tobira-node-id="991">y</span></div>
+            </body></html>"#,
+            800,
+        );
+        let hitbox = l
+            .element_hitboxes
+            .iter()
+            .find(|hitbox| hitbox.node_id == 991)
+            .expect("the span's box");
+        assert_eq!(hitbox.x, 38);
     }
 
     #[test]
