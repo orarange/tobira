@@ -24,3 +24,19 @@ This file records any exception where Codex touches CSS-facing code or other fil
     `set_line_height` + `finish_line_height` に置き換えた。
     理由: `line-height:40px` が比率で継承されて、32px の子の行が 80px になっとった
     （Chrome 40）。`font-size:32px; line-height:40px` も親の大きさで割っとった。
+
+- 2026-09-28 (Claude): super/sub の量で `src/css.rs` を触った（記録漏れを後から追記）。
+  - Touched files: `src/css.rs`, `src/layout.rs`, `src/browser.rs`（テストの初期化子のみ）
+  - CSS engine files modified: `src/css.rs` — `baseline_shift` を 1/64px の
+    `baseline_shift_lu` に改名し、`vertical-align: super/sub` と `<sup>`/`<sub>` の
+    量を Chrome の式（親の font-size の 1/3 + 1px、1/5 + 1px）にした。`smaller` /
+    `larger` を ÷1.2 / ×1.2 に。
+    理由: sup.html が 2/10 で、上付きの位置も字の大きさも Chrome と違うとった。
+
+- 2026-10-02 (Claude): `border-collapse` を読むようにした。
+  - Touched files: `src/css.rs`, `src/layout.rs`, `src/browser.rs`（テストの初期化子のみ）
+  - CSS engine files modified: `src/css.rs` — `ComputedStyle::border_collapse`
+    （継承する）を足して `border-collapse: collapse | separate` を読むだけ。
+    使うのは layout の表だけ。
+    理由: 一度も読んどらんかったので、collapse の表が線を二重に持って 1 行ごとに
+    1px 高うなっとった（g2 で表より下が全部 +1）。

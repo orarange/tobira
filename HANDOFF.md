@@ -729,8 +729,20 @@ receiver の own property 数 1 / 20 / 100 / 400 で回すと、O(幅) の処理
    **行の折り返しの判定は整数の幅のまま**（触っとらん）。検体 `inlx.html`。
    ③ 空白と空の inline だけの塊は行を作らずに捨てとって、中の要素の箱も
    消えとった（`getBoundingClientRect` が 0,0）。捨てる前に 0x0 で登録。
-   **残り（別件）**: g2 は表（`border-collapse` の枠の半分の配り方）で表以下が
-   全部 +1。~~g4 の `lnk` と `inlx` の `f` は太字を普通の字幅で測っとる~~
+   **残り（別件）**: ~~g2 は表（`border-collapse` の枠の半分の配り方）で表以下が
+   全部 +1。~~ → **2026-10-02 に直した（g2 22/22）**。`border-collapse` は CSS で
+   読んでもおらんかった。いまは collapse の表で格子の線ごとに太さ（接する
+   セルの枠と、外周なら表の枠のうち一番太いもの）を決め（`CollapsedLines`）、
+   セルにはその線を丸ごと持たせて、隣とは共有する線の太さぶん重ねる。整数 px
+   のままで表の大きさは Chrome と同じになる（1px の 2 行で 47、3px で 53、
+   4px の表の枠で 28）。getBoundingClientRect 用の箱だけ線の真ん中まで削る
+   （`half_box`）。ついでに**セルの枠をそもそも描いとらんかった**のを描くように
+   した（separate も）。残り: 列の幅が整数なので、自動幅の表で 1px ずれる
+   （`tablew` t3 が 292 → 291、`collapse.html` の e/g/h）。前に t3 が合うとったのは
+   内側の線を二重に数えとったのが丸めの分をたまたま埋めとっただけ。直すなら列の幅を
+   1/64px で持つ。separate の表は**既定の border-spacing 2px も表自身の枠も
+   無視しとる**（Chrome の t4 は 36x28、tobira 30x24）し、`<table border=1>` の
+   セルの枠も出ん。どれも別件。~~g4 の `lnk` と `inlx` の `f` は太字を普通の字幅で測っとる~~
    → **2026-10-02 に直した（g4 14/14）**: 測る側（`glyph_advance_px` /
    `text_width_px` / `text_width_lu`）に `bold` を渡し、描く側も太字の
    advance で進める。ついでに**名前指定の書体（Arial 等）の太字が一度も
@@ -898,6 +910,13 @@ python tools/geom/cmp.py g4.html
 ```
 
 ## Session Log
+
+### 2026-10-02 - Claude (表の border-collapse)
+
+- `border-collapse` を読み、collapse の表は線を共有して重ねるようにした。セルの
+  枠を描くようにもした。g2 12 → 22/22、新しい検体 `collapse.html` 0 → 9/12、
+  `tablew` は 6 → 5/6（上の「残り」）。geom 全体 333 → 351/481。テスト 1211 通過 /
+  4 落ち（前と同じ 4 本）、html5lib 1213/1229。
 
 ### 2026-10-02 - Claude (空白の持ち主)
 

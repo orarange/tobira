@@ -1763,6 +1763,9 @@ pub struct ComputedStyle {
     /// table, which is why a `td { padding }` in the page overrides it
     /// rather than adding to it.
     pub table_cellpadding: Option<u32>,
+    /// `border-collapse: collapse`: a table's cells share the borders between
+    /// them rather than each drawing its own. Inherited, as in CSS.
+    pub border_collapse: bool,
     /// The gap between columns.
     ///
     /// `gap` sets two: the first length is between rows, the second
@@ -1807,6 +1810,7 @@ impl ComputedStyle {
             margin_right_auto: false,
             padding: EdgeSizes::default(),
             table_cellpadding: parent.and_then(|parent| parent.table_cellpadding),
+            border_collapse: parent.is_some_and(|parent| parent.border_collapse),
             column_gap: 0,
             grid_auto_flow_column: false,
             justify_items: AlignItems::Stretch,
@@ -5410,6 +5414,11 @@ fn apply_declaration(style: &mut ComputedStyle, declaration: &Declaration, paren
                 style.text_align = text_align;
             }
         }
+        "border-collapse" => match value.trim().to_ascii_lowercase().as_str() {
+            "collapse" => style.border_collapse = true,
+            "separate" => style.border_collapse = false,
+            _ => {}
+        },
         "vertical-align" => {
             // `super` and `sub` are not a box alignment at all -- they shift the
             // box off the line's baseline, which is what `baseline_shift_lu`

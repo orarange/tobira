@@ -1,6 +1,6 @@
 use crate::css::{
     AlignItems, AlignSelf, BackgroundSize, BoxSizing, ClearSide, Color,
-    ComputedStyle, Corners, CursorKind, DEFAULT_BACKGROUND_COLOR, Display, FlexDirection, FlexWrap,
+    ComputedStyle, Corners, CursorKind, DEFAULT_BACKGROUND_COLOR, Display, EdgeSizes, FlexDirection, FlexWrap,
     FloatSide, FontFamilyKind, GridEdge, GridTrackSize, JustifyContent, LengthValue, ListStyleType,
     ObjectFit, Overflow, Position, StyledElement, StyledNode, TableRole, TextAlign, TextTransform,
     VerticalAlign, WhiteSpaceMode, apply_text_transform,
@@ -4333,7 +4333,23 @@ fn layout_table_element(
         return;
     }
 
-    let spacing = parse_dimension_attribute(element.attributes.get("cellspacing")).unwrap_or(0);
+    // `border-collapse: collapse` shares each border between the two cells
+    // either side of it, so neighbouring cells overlap by the line between
+    // them and `cellspacing` no longer applies. Without it every inner
+    // border was drawn twice over and every row was a line too tall: a
+    // two-row table of 1px borders came out 48px where Chrome makes it 47,
+    // and everything below it on the page a pixel low.
+    let lines = element
+        .style
+        .border_collapse
+        .then(|| CollapsedLines::new(element, &placements, column_count, rows.len()));
+    let spacing = if lines.is_some() {
+        0
+    } else {
+        parse_dimension_attribute(element.attributes.get("cellspacing")).unwrap_or(0)
+    };
+    let overlap_x = lines.as_ref().map_or(0, |lines| lines.inner_columns(0, column_count));
+    let overlap_y = lines.as_ref().map_or(0, |lines| lines.inner_rows(0, rows.len()));
     // `cellpadding` is now the cells' own padding, set where the UA stylesheet
     // sits so the page can override it. Adding it again here counted it twice:
     // Hacker News grew 131px, so the UA default was dropped instead -- which
@@ -4341,12 +4357,19 @@ fn layout_table_element(
     let padding = 0;
     let available_width = width.max(1);
     let track_total_spacing = spacing.saturating_mul(column_count.saturating_sub(1) as u32);
-    let content_limit = available_width.saturating_sub(track_total_spacing).max(1);
+    let content_limit = available_width
+        .saturating_sub(track_total_spacing)
+        .saturating_add(overlap_x)
+        .max(1);
     let mut sizing =
         compute_column_widths(element, &placements, content_limit, padding, images, fonts);
+    if let Some(lines) = &lines {
+        lines.widen_columns(&placements, &mut sizing);
+    }
     let preferred_content_width = sizing.widths.iter().sum::<u32>();
     let preferred_table_width = preferred_content_width
         .saturating_add(track_total_spacing)
+        .saturating_sub(overlap_x)
         .max(1);
     // An anonymous table -- one CSS wrapped around a run of cells whose
     // parent never said `display: table` -- is a box of its own inside that
@@ -4358,7 +4381,10 @@ fn layout_table_element(
     } else {
         resolve_table_width(element, available_width, preferred_table_width)
     };
-    let target_content_width = table_width.saturating_sub(track_total_spacing).max(1);
+    let target_content_width = table_width
+        .saturating_sub(track_total_spacing)
+        .saturating_add(overlap_x)
+        .max(1);
     if preferred_content_width > target_content_width {
         shrink_column_widths(&mut sizing, preferred_content_width - target_content_width);
     } else {
@@ -4368,7 +4394,8 @@ fn layout_table_element(
     let table_width = column_widths
         .iter()
         .sum::<u32>()
-        .saturating_add(track_total_spacing);
+        .saturating_add(track_total_spacing)
+        .saturating_sub(overlap_x);
     // Where the table sits in the room it was given. `align` still decides it
     // on an old page; `margin: 0 auto` is how a modern one says the same
     // thing; and a `<center>` around it centres it, which is the whole point
@@ -4393,7 +4420,10 @@ fn layout_table_element(
     let mut next_form_id = context.next_form_id;
     for placement in &placements {
         let span_width = span_width(&column_widths, placement.column_index, placement.colspan)
-            .saturating_add(spacing.saturating_mul(placement.colspan.saturating_sub(1) as u32));
+            .saturating_add(spacing.saturating_mul(placement.colspan.saturating_sub(1) as u32))
+            .saturating_sub(lines.as_ref().map_or(0, |lines| {
+                lines.inner_columns(placement.column_index, placement.colspan)
+            }));
         let inner_width = span_width.saturating_sub(padding.saturating_mul(2)).max(1);
         let cell_backdrop = placement
             .cell
@@ -4409,6 +4439,7 @@ fn layout_table_element(
             current_form.clone(),
             next_control_id,
             next_form_id,
+            cell_borders(placement, lines.as_ref()),
         );
         next_control_id = layout.next_control_id;
         next_form_id = layout.next_form_id;
@@ -4442,18 +4473,30 @@ fn layout_table_element(
     for index in 1..row_count {
         row_offsets[index] = row_offsets[index - 1]
             .saturating_add(row_heights[index - 1])
-            .saturating_add(spacing);
+            .saturating_add(spacing)
+            .saturating_sub(lines.as_ref().map_or(0, |lines| lines.rows[index]));
     }
 
+    let mut cell_boxes = Vec::with_capacity(placements.len());
     for (placement, layout) in placements.iter().zip(cell_layouts.iter()) {
         let cell_x = table_x
             .saturating_add(span_width(&column_widths, 0, placement.column_index))
-            .saturating_add(spacing.saturating_mul(placement.column_index as u32));
+            .saturating_add(spacing.saturating_mul(placement.column_index as u32))
+            .saturating_sub(lines.as_ref().map_or(0, |lines| {
+                lines.columns[1..=placement.column_index].iter().sum::<u32>()
+            }));
         let cell_y = cursor_y.saturating_add(row_offsets[placement.row_index]);
         let cell_width = span_width(&column_widths, placement.column_index, placement.colspan)
-            .saturating_add(spacing.saturating_mul(placement.colspan.saturating_sub(1) as u32));
+            .saturating_add(spacing.saturating_mul(placement.colspan.saturating_sub(1) as u32))
+            .saturating_sub(lines.as_ref().map_or(0, |lines| {
+                lines.inner_columns(placement.column_index, placement.colspan)
+            }));
         let cell_height = cell_span_height(&row_heights, placement.row_index, placement.rowspan)
-            .saturating_add(spacing.saturating_mul(placement.rowspan.saturating_sub(1) as u32));
+            .saturating_add(spacing.saturating_mul(placement.rowspan.saturating_sub(1) as u32))
+            .saturating_sub(lines.as_ref().map_or(0, |lines| {
+                lines.inner_rows(placement.row_index, placement.rowspan)
+            }));
+        cell_boxes.push((cell_x, cell_y, cell_width, cell_height));
 
         let content_area_height = cell_height.saturating_sub(padding.saturating_mul(2));
         let vertical_offset = match placement.cell.style.vertical_align {
@@ -4652,12 +4695,19 @@ fn layout_table_element(
         if let Some(node_id) = element_node_id(placement.cell)
             && !placement.cell.style.pointer_events_none
         {
+            // A collapsed cell's box runs to the middle of each line round
+            // it, which is what Chrome reports: 0.5px in from a 1px line,
+            // rounded the way a page rounds it.
+            let (x, y, width, height) = match &lines {
+                Some(lines) => lines.half_box(placement, cell_x, cell_y, cell_width, cell_height),
+                None => (cell_x, cell_y, cell_width, cell_height),
+            };
             context.element_hitboxes.push(ElementHitbox {
                 node_id,
-                x: cell_x,
-                y: cell_y,
-                width: cell_width.max(1),
-                height: cell_height.max(1),
+                x,
+                y,
+                width: width.max(1),
+                height: height.max(1),
                 cursor_kind: placement.cell.style.cursor_kind,
                 scroll_width: 0,
                 scroll_height: 0,
@@ -4665,8 +4715,23 @@ fn layout_table_element(
         }
     }
 
-    let table_height = row_heights.iter().sum::<u32>()
-        + spacing.saturating_mul(row_count.saturating_sub(1) as u32);
+    // The borders go over every cell's background, so a neighbour painted
+    // later does not cover the line it shares with one painted earlier.
+    for (placement, &(cell_x, cell_y, cell_width, cell_height)) in
+        placements.iter().zip(cell_boxes.iter())
+    {
+        paint_cell_borders(
+            element,
+            placement,
+            lines.as_ref(),
+            (cell_x, cell_y, cell_width, cell_height),
+            context,
+        );
+    }
+
+    let table_height = (row_heights.iter().sum::<u32>()
+        + spacing.saturating_mul(row_count.saturating_sub(1) as u32))
+    .saturating_sub(overlap_y);
     // And the table's own box, for the same reason the cells needed one.
     if let Some(node_id) = element_node_id(element)
         && !element.style.pointer_events_none
@@ -4686,6 +4751,260 @@ fn layout_table_element(
     context.next_form_id = next_form_id;
     *cursor_y = cursor_y.saturating_add(table_height);
     *cursor_y = advance_by_margin(*cursor_y, element.style.margin.bottom);
+}
+
+/// A box's border widths, or none at all when its border style is `none`.
+fn own_borders(style: &ComputedStyle) -> EdgeSizes {
+    if style.border_style_none {
+        EdgeSizes::default()
+    } else {
+        style.border
+    }
+}
+
+/// The lines of a collapsed table: how wide each one is, the widest border
+/// that meets it -- the cells' either side, and the table's own on the
+/// outside. `columns` has one entry per vertical line, left to right, and
+/// `rows` one per horizontal line, top to bottom.
+///
+/// Chrome gives each cell half of every line round it, in fractions of a
+/// pixel. The cells here are laid out in whole pixels, so each one is given
+/// the whole of every line round it and its neighbours overlap it by the
+/// line they share. The table comes out the same size either way -- 47px for
+/// two rows of 1px lines, 53 for 3px ones -- and the box a page is shown for
+/// a cell is cut back to the middle of its lines (`half_box`).
+struct CollapsedLines {
+    columns: Vec<u32>,
+    rows: Vec<u32>,
+    /// The table's own borders, which take the outer lines where they are
+    /// wider than the cells'.
+    table: EdgeSizes,
+}
+
+impl CollapsedLines {
+    fn new(
+        table: &StyledElement,
+        placements: &[TablePlacement],
+        column_count: usize,
+        row_count: usize,
+    ) -> Self {
+        let mut columns = vec![0_u32; column_count + 1];
+        let mut rows = vec![0_u32; row_count + 1];
+        for placement in placements {
+            let borders = own_borders(&placement.cell.style);
+            let left = placement.column_index.min(column_count);
+            let right = (placement.column_index + placement.colspan).min(column_count);
+            let top = placement.row_index.min(row_count);
+            let bottom = (placement.row_index + placement.rowspan).min(row_count);
+            columns[left] = columns[left].max(borders.left);
+            columns[right] = columns[right].max(borders.right);
+            rows[top] = rows[top].max(borders.top);
+            rows[bottom] = rows[bottom].max(borders.bottom);
+        }
+        let table_borders = own_borders(&table.style);
+        columns[0] = columns[0].max(table_borders.left);
+        columns[column_count] = columns[column_count].max(table_borders.right);
+        rows[0] = rows[0].max(table_borders.top);
+        rows[row_count] = rows[row_count].max(table_borders.bottom);
+        Self {
+            columns,
+            rows,
+            table: table_borders,
+        }
+    }
+
+    /// The lines inside `span` columns from `start`, which the cells either
+    /// side of them share.
+    fn inner_columns(&self, start: usize, span: usize) -> u32 {
+        let end = (start + span).min(self.columns.len().saturating_sub(1));
+        self.columns
+            .get(start + 1..end)
+            .map_or(0, |lines| lines.iter().sum())
+    }
+
+    fn inner_rows(&self, start: usize, span: usize) -> u32 {
+        let end = (start + span).min(self.rows.len().saturating_sub(1));
+        self.rows
+            .get(start + 1..end)
+            .map_or(0, |lines| lines.iter().sum())
+    }
+
+    /// The lines round a cell.
+    fn around(&self, placement: &TablePlacement) -> EdgeSizes {
+        let last_column = self.columns.len() - 1;
+        let last_row = self.rows.len() - 1;
+        EdgeSizes {
+            top: self.rows[placement.row_index.min(last_row)],
+            right: self.columns[(placement.column_index + placement.colspan).min(last_column)],
+            bottom: self.rows[(placement.row_index + placement.rowspan).min(last_row)],
+            left: self.columns[placement.column_index.min(last_column)],
+        }
+    }
+
+    /// Columns were measured with each cell's own borders; a line wider than
+    /// a cell's border needs the difference as well. A 4px table border
+    /// round 1px cells makes the outer columns three pixels wider.
+    fn widen_columns(&self, placements: &[TablePlacement], sizing: &mut TableColumnSizing) {
+        let mut extra = vec![0_u32; sizing.widths.len()];
+        for placement in placements.iter().filter(|placement| placement.colspan == 1) {
+            let own = own_borders(&placement.cell.style);
+            let lines = self.around(placement);
+            let wider = (lines.left + lines.right).saturating_sub(own.left + own.right);
+            if let Some(slot) = extra.get_mut(placement.column_index) {
+                *slot = (*slot).max(wider);
+            }
+        }
+        for (index, wider) in extra.into_iter().enumerate() {
+            sizing.widths[index] = sizing.widths[index].saturating_add(wider);
+            if let Some(min) = sizing.mins.get_mut(index) {
+                *min = min.saturating_add(wider);
+            }
+        }
+    }
+
+    /// A cell's box cut back to the middle of the lines round it, rounded
+    /// to whole pixels the way `getBoundingClientRect` is read: 0.5 up.
+    fn half_box(
+        &self,
+        placement: &TablePlacement,
+        x: u32,
+        y: u32,
+        width: u32,
+        height: u32,
+    ) -> (u32, u32, u32, u32) {
+        let lines = self.around(placement);
+        let half = |whole: u32, lead: u32, trail: u32| {
+            let start = i64::from(whole) * 2 + i64::from(lead);
+            (start, i64::from(lead) + i64::from(trail))
+        };
+        let round = |halves: i64| ((halves + 1).div_euclid(2)).max(0) as u32;
+        let (x2, x_lines) = half(x, lines.left, lines.right);
+        let (y2, y_lines) = half(y, lines.top, lines.bottom);
+        (
+            round(x2),
+            round(y2),
+            round(i64::from(width) * 2 - x_lines),
+            round(i64::from(height) * 2 - y_lines),
+        )
+    }
+}
+
+/// The borders a cell is laid out with: its own, or in a collapsed table the
+/// lines round it.
+fn cell_borders(placement: &TablePlacement, lines: Option<&CollapsedLines>) -> EdgeSizes {
+    match lines {
+        Some(lines) => lines.around(placement),
+        None => own_borders(&placement.cell.style),
+    }
+}
+
+/// Draw a cell's borders. They took up room in the layout and were never
+/// painted, so a table drawn with `td { border: 1px solid }` showed no lines.
+/// In a collapsed table an outer line the table's own border is wider than
+/// the cell's is drawn in the table's colour.
+fn paint_cell_borders(
+    table: &StyledElement,
+    placement: &TablePlacement,
+    lines: Option<&CollapsedLines>,
+    (x, y, width, height): (u32, u32, u32, u32),
+    context: &mut LayoutContext,
+) {
+    let style = &placement.cell.style;
+    let widths = cell_borders(placement, lines);
+    let own = own_borders(style);
+    let cell_color =
+        (!style.border_style_none && !style.border_color_transparent).then_some(style.border_color);
+    let table_color = (!table.style.border_style_none && !table.style.border_color_transparent)
+        .then_some(table.style.border_color);
+    let last_column = lines.map_or(0, |lines| lines.columns.len() - 1);
+    let last_row = lines.map_or(0, |lines| lines.rows.len() - 1);
+    let table_borders = lines.map_or_else(EdgeSizes::default, |lines| lines.table);
+    // Which border a side of a collapsed cell is drawn with: the widest one
+    // that meets it wins the line. The table's wins an outer line only when it
+    // is wider than the cell's; a neighbour's wider border wins a shared line
+    // and is drawn by the neighbour; and an outer line made wide by another
+    // cell in the row keeps this cell's own, thinner border in its middle.
+    // Returns the colour, how thick to draw, and how far in from the line's
+    // outer edge.
+    let side = |outer: bool, line: u32, table_width: u32, own_width: u32| {
+        if lines.is_none() {
+            return cell_color.map(|color| (color, line, 0));
+        }
+        if outer && table_width > own_width {
+            return table_color.map(|color| (color, line, 0));
+        }
+        if own_width >= line {
+            return cell_color.map(|color| (color, line, 0));
+        }
+        if !outer || own_width == 0 {
+            return None;
+        }
+        cell_color.map(|color| (color, own_width, (line - own_width) / 2))
+    };
+    let top = side(placement.row_index == 0, widths.top, table_borders.top, own.top);
+    let bottom = side(
+        placement.row_index + placement.rowspan >= last_row,
+        widths.bottom,
+        table_borders.bottom,
+        own.bottom,
+    );
+    let left = side(placement.column_index == 0, widths.left, table_borders.left, own.left);
+    let right = side(
+        placement.column_index + placement.colspan >= last_column,
+        widths.right,
+        table_borders.right,
+        own.right,
+    );
+    if let Some((color, thick, inset)) = top {
+        push_border_bar(context, style, color, x, y + inset, width, thick);
+    }
+    if let Some((color, thick, inset)) = bottom {
+        push_border_bar(
+            context,
+            style,
+            color,
+            x,
+            (y + height).saturating_sub(inset + thick),
+            width,
+            thick,
+        );
+    }
+    if let Some((color, thick, inset)) = left {
+        push_border_bar(context, style, color, x + inset, y, thick, height);
+    }
+    if let Some((color, thick, inset)) = right {
+        push_border_bar(
+            context,
+            style,
+            color,
+            (x + width).saturating_sub(inset + thick),
+            y,
+            thick,
+            height,
+        );
+    }
+}
+
+fn push_border_bar(
+    context: &mut LayoutContext,
+    style: &ComputedStyle,
+    color: Color,
+    x: u32,
+    y: u32,
+    width: u32,
+    height: u32,
+) {
+    if width == 0 || height == 0 {
+        return;
+    }
+    context.commands.push(DrawCommand::Rect(RectCommand {
+        x,
+        y,
+        width,
+        height,
+        color: apply_opacity(color, context.background_color, style.effective_opacity),
+        border_radius: Corners::ZERO,
+    }));
 }
 
 #[derive(Debug, Clone)]
@@ -4989,6 +5308,7 @@ fn layout_table_cell(
     current_form: Option<FormContext>,
     control_id_seed: usize,
     form_id_seed: usize,
+    borders: EdgeSizes,
 ) -> FragmentLayout {
     let mut context = LayoutContext {
         background_color,
@@ -5003,27 +5323,11 @@ fn layout_table_cell(
     // other box. Only the legacy `cellpadding` attribute was counted, so a
     // table styled the modern way -- `td { padding: 4px; border: 1px }` --
     // came out two pixels short of its content on every side and the rows sat
-    // tighter than the page asked for.
-    let (border_x, border_y) = if cell.style.border_style_none {
-        (0, 0)
-    } else {
-        (
-            cell.style.border.left + cell.style.border.right,
-            cell.style.border.top + cell.style.border.bottom,
-        )
-    };
-    let inset_left = cell.style.padding.left
-        + if cell.style.border_style_none {
-            0
-        } else {
-            cell.style.border.left
-        };
-    let inset_top = cell.style.padding.top
-        + if cell.style.border_style_none {
-            0
-        } else {
-            cell.style.border.top
-        };
+    // tighter than the page asked for. The borders are handed in: in a
+    // collapsed table they are the shared lines, not the cell's own.
+    let (border_x, border_y) = (borders.left + borders.right, borders.top + borders.bottom);
+    let inset_left = cell.style.padding.left + borders.left;
+    let inset_top = cell.style.padding.top + borders.top;
     let surround_x = cell.style.padding.left + cell.style.padding.right + border_x;
     let surround_y = cell.style.padding.top + cell.style.padding.bottom + border_y;
     let inner_width = width.saturating_sub(surround_x).max(1);
@@ -13447,6 +13751,60 @@ mod tests {
             .find(|hitbox| hitbox.node_id == 990)
             .expect("the span's box");
         assert_eq!((hitbox.x, hitbox.width), (42, 48));
+    }
+
+    #[test]
+    fn collapsed_cells_share_the_lines_between_them() {
+        // Checked against Chrome (`tools/geom/collapse.html`): two rows of
+        // 1px-bordered cells with 2px padding make a 47px table, the first
+        // cell reported half a line in (0.5 → 1) and 133 wide. Each cell
+        // keeping both its borders made the table 48 and the cell 0,0 134x24.
+        let l = probe_layout(
+            r#"<html><body style="margin:0;font:16px Arial">
+                <table data-tobira-node-id="996" style="border-collapse:collapse;width:400px">
+                <tr><td data-tobira-node-id="997" style="border:1px solid #000;padding:2px">a</td>
+                <td colspan="2" style="border:1px solid #000;padding:2px">b</td></tr>
+                <tr><td style="border:1px solid #000;padding:2px">c</td>
+                <td style="border:1px solid #000;padding:2px">d</td>
+                <td style="border:1px solid #000;padding:2px">e</td></tr></table>
+            </body></html>"#,
+            800,
+        );
+        let hitbox = |id: usize| {
+            let hitbox = l
+                .element_hitboxes
+                .iter()
+                .find(|hitbox| hitbox.node_id == id)
+                .expect("the box");
+            (hitbox.x, hitbox.y, hitbox.width, hitbox.height)
+        };
+        assert_eq!(hitbox(996), (0, 0, 400, 47));
+        assert_eq!(hitbox(997), (1, 1, 133, 23));
+    }
+
+    #[test]
+    fn a_wider_table_border_takes_the_outer_lines() {
+        // A 4px table border round 1px cells: Chrome makes the cells 24 tall
+        // (half of 4, a pixel of padding, 18 of text, and back) and the
+        // table 28.
+        let l = probe_layout(
+            r#"<html><body style="margin:0;font:16px Arial">
+                <table data-tobira-node-id="998" style="border-collapse:collapse;border:4px solid red">
+                <tr><td data-tobira-node-id="999" style="border:1px solid #000">a</td>
+                <td style="border:1px solid #000">b</td></tr></table>
+            </body></html>"#,
+            800,
+        );
+        let hitbox = |id: usize| {
+            let hitbox = l
+                .element_hitboxes
+                .iter()
+                .find(|hitbox| hitbox.node_id == id)
+                .expect("the box");
+            (hitbox.y, hitbox.height)
+        };
+        assert_eq!(hitbox(998), (0, 28));
+        assert_eq!(hitbox(999), (2, 24));
     }
 
     #[test]
