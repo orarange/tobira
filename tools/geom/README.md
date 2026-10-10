@@ -19,6 +19,8 @@ python tools/geom/cmp.py g4.html
 | `wsown.html` | which element a collapsible space belongs to | 8/9 |
 | `collapse.html` | `border-collapse: collapse` tables | 9/12 |
 | `separate.html` | separated tables: spacing, table border/padding, `border=N` | 27/27 |
+| `quirkstable.html` | a table in quirks mode drops the body's text settings | 5/10 |
+| `limitedtable.html` | the same page in limited-quirks mode keeps them | 2/10 |
 | `g5.html` | modern CSS (custom properties, logical props, clamp) | 23/26 |
 | `g6.html` | font-family name resolution | 10/12 |
 | `g6b.html` | which face each generic family resolves to | 17/32 |

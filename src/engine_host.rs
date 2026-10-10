@@ -350,6 +350,11 @@ pub struct BrowserHost {
     /// the stylesheet rather than on any element.
     root_custom_properties: std::collections::BTreeMap<String, String>,
     structural_changes: Vec<DomStructuralChange>,
+    /// The page's doctype, written out again in front of the snapshot. This
+    /// DOM does not hold it, and the snapshot is parsed again for layout:
+    /// without it every page that ran a script was laid out in quirks mode,
+    /// whatever it declared.
+    doctype_source: Option<String>,
 }
 
 impl BrowserHost {
@@ -389,6 +394,13 @@ impl BrowserHost {
             computed_styles: HashMap::new(),
             root_custom_properties: std::collections::BTreeMap::new(),
             structural_changes: Vec::new(),
+            doctype_source: match &root {
+                Node::Element(element) => element.children.iter().find_map(|child| match child {
+                    Node::Doctype(doctype) => crate::html::doctype_source(doctype),
+                    _ => None,
+                }),
+                _ => None,
+            },
         };
         host.document = host.push(DomNode::document());
         // The parsed root is an "document" element; graft its children under
@@ -816,7 +828,11 @@ impl BrowserHost {
     /// which is what the shadow tree's `<style>` rules are rewritten to
     /// select, so they reach their own tree and nothing else.
     pub fn serialize_document(&self) -> String {
-        self.render_node(self.document)
+        let body = self.render_node(self.document);
+        match &self.doctype_source {
+            Some(doctype) => format!("{doctype}{body}"),
+            None => body,
+        }
     }
 
     /// The document as a page's script sees it: light children only, no

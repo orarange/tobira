@@ -4,7 +4,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::{Mutex, OnceLock};
 
-use crate::html::{Element, Node};
+use crate::html::{DocumentMode, Element, Node};
 
 mod color;
 pub use color::parse_color;
@@ -2037,6 +2037,26 @@ impl ComputedStyle {
                 style.border_spacing_x = 2;
                 style.border_spacing_y = 2;
                 style.table_cell_borders = false;
+                // The quirks-mode UA stylesheet: a table does not inherit the
+                // text settings round it. Font size, weight and style, line
+                // height, alignment and `white-space` go back to their
+                // initial values; colour and font family still inherit.
+                // Checked against Chrome, which makes a cell in a 20px bold
+                // italic centred body 16px, normal and left-aligned on a page
+                // with no doctype, and leaves it alone on one with
+                // `<!DOCTYPE html>` or an XHTML 1.0 one. Old pages with no
+                // doctype set their body type large and their tables came out
+                // in it, rows taller than any browser makes them.
+                if quirks_mode() {
+                    style.font_size_mpx = INITIAL_FONT_SIZE_MPX;
+                    style.font_weight = false;
+                    style.font_style_italic = false;
+                    style.line_height = 0;
+                    style.line_height_fixed_mpx = 0;
+                    style.line_height_em_pending = false;
+                    style.text_align = TextAlign::Left;
+                    style.white_space = WhiteSpaceMode::Normal;
+                }
             }
             "td" | "th" => {
                 style.vertical_align = VerticalAlign::Middle;
@@ -3260,6 +3280,16 @@ thread_local! {
     static ROOT_FONT_SIZE_MPX: Cell<u32> = const { Cell::new(INITIAL_FONT_SIZE_MPX) };
 }
 
+thread_local! {
+    /// Whether the document being styled is in quirks mode, which the UA
+    /// stylesheet reads for its quirks rules. Set with the root font size.
+    static QUIRKS_MODE: Cell<bool> = const { Cell::new(false) };
+}
+
+fn quirks_mode() -> bool {
+    QUIRKS_MODE.with(Cell::get)
+}
+
 fn root_font_size_mpx() -> u32 {
     ROOT_FONT_SIZE_MPX.with(|size| size.get())
 }
@@ -3279,6 +3309,9 @@ fn establish_root_font_size(
     interactive: &InteractiveState,
 ) {
     ROOT_FONT_SIZE_MPX.with(|size| size.set(INITIAL_FONT_SIZE_MPX));
+    QUIRKS_MODE.with(|quirks| {
+        quirks.set(crate::html::document_mode(document) == DocumentMode::Quirks)
+    });
     let Some(root) = root_element(document) else {
         return;
     };

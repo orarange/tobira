@@ -747,8 +747,21 @@ receiver の own property 数 1 / 20 / 100 / 400 で回すと、O(幅) の処理
    `<table border=N>` は表に N px、セルに 1px の灰色の枠（Chrome は outset/inset の
    立体で、ここは平たい）。表自身の背景と枠も描くようにした（前は表の `bgcolor`
    すら塗っとらんかった。HN のベージュの地がこれ）。
-   **quirks モードの表の font リセットは無い**: doctype の無い頁で Chrome は表の
-   中の line-height / font-size を normal / medium に戻す。tobira は戻さん。~~g4 の `lnk` と `inlx` の `f` は太字を普通の字幅で測っとる~~
+   ~~quirks モードの表の font リセットは無い~~ → **2026-10-10 に入れた**
+   （`tools/geom/quirkstable.html` 1 → 5/10）。直す途中で二つ見つけた:
+   ① doctype の判定が「識別子が付いとったら quirks」やった。XHTML 1.0 も
+   HTML 4.01 Strict も quirks 扱い。いまは仕様どおり（`html::doctype_mode`、
+   no-quirks / limited-quirks / quirks、force-quirks も）。表のリセットは quirks
+   だけで、limited-quirks（XHTML 1.0 Transitional など）では掛けん（Chrome で確認）。
+   ② **スクリプトが走った頁は doctype が消えとった**。エンジンの DOM が doctype を
+   持たんので、書き出した snapshot を読み直すと必ず quirks になっとった
+   （`BrowserHost::doctype_source` で先頭に付け直す）。パーサの quirks の差
+   （`<table>` が `<p>` を閉じるか）もこれで直っとるはず。
+   残り（どれも前から、quirks と無関係）: 固定幅の表で余った幅を列に**均等**に
+   配っとる（Chrome は max-content の比で配る。`quirkstable` の a は Chrome 69、
+   tobira 135）。**表のセルの中の span の箱が 0,0**（inline_rects がセルから
+   親に渡っとらん）。自動幅のセルで、測った幅ちょうどの字が折り返す
+   （`limitedtable` の e）。JS の `document.compatMode` は常に `CSS1Compat`。~~g4 の `lnk` と `inlx` の `f` は太字を普通の字幅で測っとる~~
    → **2026-10-02 に直した（g4 14/14）**: 測る側（`glyph_advance_px` /
    `text_width_px` / `text_width_lu`）に `bold` を渡し、描く側も太字の
    advance で進める。ついでに**名前指定の書体（Arial 等）の太字が一度も
@@ -916,6 +929,13 @@ python tools/geom/cmp.py g4.html
 ```
 
 ## Session Log
+
+### 2026-10-10 - Claude (quirks モードの表)
+
+- quirks の文書で `<table>` が字の設定を初期値に戻すようにした。doctype の
+  判定を仕様どおりにし、スクリプト後の snapshot に doctype を付け直した。
+  quirkstable 1 → 5/10、geom 全体 381 → 385/528（ほかは変わらず）。WPT reftest
+  9/26 で変わらず。テスト 1214 通過 / 4 落ち（前と同じ 4 本）、html5lib 1213/1229。
 
 ### 2026-10-10 - Claude (separate の表)
 

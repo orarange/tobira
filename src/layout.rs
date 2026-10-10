@@ -14957,13 +14957,36 @@ mod tests {
     }
 
     #[test]
+    fn a_table_in_quirks_mode_drops_the_text_settings_round_it() {
+        // Checked against Chrome (`tools/geom/quirkstable.html`): with no
+        // doctype, a table in a body of `bold 20px/2` text is set in 16px
+        // with a normal line, so a one-row table is 20 + 4 tall. With
+        // `<!DOCTYPE html>` it inherits the 40px line: 42 + 4.
+        let height = |source: &str| {
+            let document = parse_document(source);
+            let styled = build_styled_tree(
+                &document,
+                &parse_stylesheet("body{margin:0;font:bold 20px/2 Arial}"),
+                1280,
+                &crate::css::InteractiveState::default(),
+            );
+            let mut fonts = FontContext::load();
+            layout_styled_document(&styled, &ImageStore::default(), 600, &mut fonts).content_height
+        };
+        assert_eq!(height("<table><tr><td>a</td></tr></table>"), 24);
+        assert_eq!(height("<!DOCTYPE html><table><tr><td>a</td></tr></table>"), 46);
+    }
+
+    #[test]
     fn a_table_cell_makes_room_for_its_own_padding_and_border() {
         // Chrome gives this table a 34px row: 24 of line, 8 of padding and 2 of
         // border, and the table the UA's 2px of `border-spacing` above and
         // below it. Only the legacy `cellpadding` attribute was counted, so a
         // table styled the modern way came out short on every side.
         let document = parse_document(
-            "<table style=\"width:400px\"><tr><td style=\"padding:4px;border:1px solid black\">a</td></tr></table>",
+            // Standards mode: with no doctype the table would drop the
+            // body's line height (the quirks-mode UA stylesheet).
+            "<!DOCTYPE html><table style=\"width:400px\"><tr><td style=\"padding:4px;border:1px solid black\">a</td></tr></table>",
         );
         let styled = build_styled_tree(
             &document,

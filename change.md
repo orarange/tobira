@@ -50,3 +50,13 @@ This file records any exception where Codex touches CSS-facing code or other fil
     Chrome は outset/inset やけどここでは平たい線）。
     理由: 既定の 2px も表自身の枠と余白も数えとらんで、素の `<table>` が Chrome の
     28x46 に対して 22x40 やった。`border="1"` の表は枠が一本も出んかった。
+
+- 2026-10-10 (Claude): quirks モードの表のために `src/css.rs` を触った。
+  - Touched files: `src/css.rs`, `src/html.rs`, `src/engine_host.rs`, `src/layout.rs`（テスト）
+  - CSS engine files modified: `src/css.rs` — 文書が quirks モードのとき（スレッド
+    ローカル `QUIRKS_MODE`、`establish_root_font_size` で決める）だけ、`<table>` の
+    UA 既定で font-size / font-weight / font-style / line-height / text-align /
+    white-space を初期値に戻す（Chrome の quirks.css の `table` 規則）。色と書体は
+    継承のまま。
+    理由: doctype の無い古い頁で、body の大きい字と行の高さが表の中まで入って、
+    行が Chrome より高うなっとった。
