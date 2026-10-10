@@ -1,0 +1,9 @@
+<html><head><style>body{margin:0;font:bold 20px/2 Arial;text-align:center;width:600px}</style></head><body>
+<div id="before">before</div>
+<table id="t" style="width:300px"><tr><td id="a">a</td><td id="b">bb</td></tr><tr><td id="c">c</td><td id="d"><span id="s" style="font-size:1.5em">em</span></td></tr></table>
+<table id="u"><tr><td id="e">text in a table</td></tr></table>
+<div id="z">after</div>
+<pre id="out"></pre>
+<script>
+document.getElementById("out").textContent="before t a b c d s u e z".split(" ").map(function(id){var r=document.getElementById(id).getBoundingClientRect();return id+" "+Math.round(r.x)+","+Math.round(r.y)+" "+Math.round(r.width)+"x"+Math.round(r.height);}).join("\n");
+</script></body></html>

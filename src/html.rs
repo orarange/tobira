@@ -76,6 +76,160 @@ pub struct Doctype {
     pub name: String,
     pub public_id: Option<String>,
     pub system_id: Option<String>,
+    /// The declaration was malformed, which puts the page in quirks mode
+    /// whatever it says (the tokenizer's force-quirks flag).
+    pub force_quirks: bool,
+}
+
+/// How a page is laid out: the standard's three document modes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DocumentMode {
+    NoQuirks,
+    /// Old XHTML 1.0 and HTML 4.01 Transitional/Frameset doctypes with a
+    /// system identifier. Only a line-height quirk for images in table cells
+    /// depends on it; tables keep their fonts.
+    LimitedQuirks,
+    Quirks,
+}
+
+/// Public identifiers that put a page in quirks mode, matched as prefixes
+/// and without regard to case (HTML, "the initial insertion mode").
+const QUIRKY_PUBLIC_ID_PREFIXES: &[&str] = &[
+    "+//silmaril//dtd html pro v0r11 19970101//",
+    "-//as//dtd html 3.0 aswedit + extensions//",
+    "-//advasoft ltd//dtd html 3.0 aswedit + extensions//",
+    "-//ietf//dtd html 2.0 level 1//",
+    "-//ietf//dtd html 2.0 level 2//",
+    "-//ietf//dtd html 2.0 strict level 1//",
+    "-//ietf//dtd html 2.0 strict level 2//",
+    "-//ietf//dtd html 2.0 strict//",
+    "-//ietf//dtd html 2.0//",
+    "-//ietf//dtd html 2.1e//",
+    "-//ietf//dtd html 3.0//",
+    "-//ietf//dtd html 3.2 final//",
+    "-//ietf//dtd html 3.2//",
+    "-//ietf//dtd html 3//",
+    "-//ietf//dtd html level 0//",
+    "-//ietf//dtd html level 1//",
+    "-//ietf//dtd html level 2//",
+    "-//ietf//dtd html level 3//",
+    "-//ietf//dtd html strict level 0//",
+    "-//ietf//dtd html strict level 1//",
+    "-//ietf//dtd html strict level 2//",
+    "-//ietf//dtd html strict level 3//",
+    "-//ietf//dtd html strict//",
+    "-//ietf//dtd html//",
+    "-//metrius//dtd metrius presentational//",
+    "-//microsoft//dtd internet explorer 2.0 html strict//",
+    "-//microsoft//dtd internet explorer 2.0 html//",
+    "-//microsoft//dtd internet explorer 2.0 tables//",
+    "-//microsoft//dtd internet explorer 3.0 html strict//",
+    "-//microsoft//dtd internet explorer 3.0 html//",
+    "-//microsoft//dtd internet explorer 3.0 tables//",
+    "-//netscape comm. corp.//dtd html//",
+    "-//netscape comm. corp.//dtd strict html//",
+    "-//o'reilly and associates//dtd html 2.0//",
+    "-//o'reilly and associates//dtd html extended 1.0//",
+    "-//o'reilly and associates//dtd html extended relaxed 1.0//",
+    "-//sq//dtd html 2.0 hotmetal + extensions//",
+    "-//softquad software//dtd hotmetal pro 6.0::19990601::extensions to html 4.0//",
+    "-//softquad//dtd hotmetal pro 4.0::19971010::extensions to html 4.0//",
+    "-//spyglass//dtd html 2.0 extended//",
+    "-//sun microsystems corp.//dtd hotjava html//",
+    "-//sun microsystems corp.//dtd hotjava strict html//",
+    "-//w3c//dtd html 3 1995-03-24//",
+    "-//w3c//dtd html 3.2 draft//",
+    "-//w3c//dtd html 3.2 final//",
+    "-//w3c//dtd html 3.2//",
+    "-//w3c//dtd html 3.2s draft//",
+    "-//w3c//dtd html 4.0 frameset//",
+    "-//w3c//dtd html 4.0 transitional//",
+    "-//w3c//dtd html experimental 19960712//",
+    "-//w3c//dtd html experimental 970421//",
+    "-//w3c//dtd w3 html//",
+    "-//w3o//dtd w3 html 3.0//",
+    "-//webtechs//dtd mozilla html 2.0//",
+    "-//webtechs//dtd mozilla html//",
+];
+
+/// The mode a doctype puts a page in, by the standard's rules. No doctype
+/// at all is quirks mode.
+///
+/// Any public identifier used to mean quirks mode here, so every XHTML 1.0
+/// and HTML 4.01 Strict page -- most of the pre-HTML5 web that bothered to
+/// declare itself -- was read as one; Chrome lays those out in standards
+/// mode.
+pub fn doctype_mode(doctype: Option<&Doctype>) -> DocumentMode {
+    let Some(doctype) = doctype else {
+        return DocumentMode::Quirks;
+    };
+    if doctype.force_quirks || !doctype.name.eq_ignore_ascii_case("html") {
+        return DocumentMode::Quirks;
+    }
+    let public = doctype.public_id.as_deref().map(str::to_ascii_lowercase);
+    let system = doctype.system_id.as_deref().map(str::to_ascii_lowercase);
+    let public = public.as_deref().unwrap_or("");
+    let starts = |prefix: &str| public.starts_with(prefix);
+    let html401_loose = starts("-//w3c//dtd html 4.01 frameset//")
+        || starts("-//w3c//dtd html 4.01 transitional//");
+    if matches!(
+        public,
+        "-//w3o//dtd w3 html strict 3.0//en//" | "-/w3c/dtd html 4.0 transitional/en" | "html"
+    ) || system.as_deref() == Some("http://www.ibm.com/data/dtd/v11/ibmxhtml1-transitional.dtd")
+        || QUIRKY_PUBLIC_ID_PREFIXES.iter().any(|prefix| starts(prefix))
+        || (html401_loose && system.is_none())
+    {
+        return DocumentMode::Quirks;
+    }
+    if starts("-//w3c//dtd xhtml 1.0 frameset//")
+        || starts("-//w3c//dtd xhtml 1.0 transitional//")
+        || html401_loose
+    {
+        return DocumentMode::LimitedQuirks;
+    }
+    DocumentMode::NoQuirks
+}
+
+/// A doctype written back out, so that parsing it again gives the same
+/// document mode. A malformed one is left out: no doctype is quirks mode,
+/// which is what it was.
+pub fn doctype_source(doctype: &Doctype) -> Option<String> {
+    if doctype.force_quirks {
+        return None;
+    }
+    let quote = |value: &str| {
+        if value.contains('"') {
+            format!("'{value}'")
+        } else {
+            format!("\"{value}\"")
+        }
+    };
+    let mut source = format!("<!DOCTYPE {}", doctype.name);
+    match (&doctype.public_id, &doctype.system_id) {
+        (Some(public), Some(system)) => {
+            source.push_str(&format!(" PUBLIC {} {}", quote(public), quote(system)))
+        }
+        (Some(public), None) => source.push_str(&format!(" PUBLIC {}", quote(public))),
+        (None, Some(system)) => source.push_str(&format!(" SYSTEM {}", quote(system))),
+        (None, None) => {}
+    }
+    source.push('>');
+    Some(source)
+}
+
+/// The mode a parsed document is in, read off its doctype node.
+pub fn document_mode(document: &Node) -> DocumentMode {
+    fn find(node: &Node, depth: usize) -> Option<&Doctype> {
+        match node {
+            Node::Doctype(doctype) => Some(doctype),
+            Node::Element(element) if depth < 2 => element
+                .children
+                .iter()
+                .find_map(|child| find(child, depth + 1)),
+            _ => None,
+        }
+    }
+    doctype_mode(find(document, 0))
 }
 
 /// Read a `<!DOCTYPE ...>` declaration.
@@ -97,6 +251,7 @@ fn parse_doctype(raw: &str) -> Doctype {
         name,
         public_id: None,
         system_id: None,
+        force_quirks: false,
     };
 
     fn take_quoted(rest: &mut &str) -> Option<String> {
@@ -115,15 +270,24 @@ fn parse_doctype(raw: &str) -> Doctype {
         rest = rest[6..].trim_start();
         match take_quoted(&mut rest) {
             Some(public) => doctype.public_id = Some(public),
-            None => return doctype,
+            None => {
+                doctype.force_quirks = true;
+                return doctype;
+            }
         }
         doctype.system_id = take_quoted(&mut rest);
     } else if rest.len() >= 6 && rest[..6].eq_ignore_ascii_case("system") {
         rest = rest[6..].trim_start();
         match take_quoted(&mut rest) {
             Some(system) => doctype.system_id = Some(system),
-            None => return doctype,
+            None => {
+                doctype.force_quirks = true;
+                return doctype;
+            }
         }
+    } else if !rest.is_empty() {
+        // Something other than PUBLIC or SYSTEM after the name.
+        doctype.force_quirks = true;
     }
 
     doctype
@@ -2049,9 +2213,7 @@ fn parse_document_body(input: &str) -> (Node, ParseExtras) {
                     // `<!DOCTYPE html>` with no identifiers is the modern one.
                     // Anything else -- another name, or one of the old public
                     // identifiers -- keeps the page in quirks mode.
-                    builder.quirks = doctype.name != "html"
-                        || doctype.public_id.is_some()
-                        || doctype.system_id.is_some();
+                    builder.quirks = doctype_mode(Some(&doctype)) == DocumentMode::Quirks;
                     builder.insert(BuildKind::Doctype(doctype));
                 }
             }
@@ -4843,5 +5005,40 @@ got:
             passed >= 1,
             "the suite should run and something should pass: {passed}/{ran}"
         );
+    }
+}
+
+#[cfg(test)]
+mod document_mode_tests {
+    use super::{DocumentMode, document_mode, parse_document};
+
+    #[test]
+    fn a_doctype_decides_the_document_mode() {
+        let mode = |source: &str| document_mode(&parse_document(source));
+        assert_eq!(mode("<html><body>x"), DocumentMode::Quirks);
+        assert_eq!(mode("<!DOCTYPE html><html><body>x"), DocumentMode::NoQuirks);
+        assert_eq!(
+            mode(r#"<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01 Transitional//EN"><body>x"#),
+            DocumentMode::Quirks
+        );
+        assert_eq!(
+            mode(
+                r#"<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01 Transitional//EN" "http://www.w3.org/TR/html4/loose.dtd"><body>x"#
+            ),
+            DocumentMode::LimitedQuirks
+        );
+        assert_eq!(
+            mode(
+                r#"<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd"><body>x"#
+            ),
+            DocumentMode::LimitedQuirks
+        );
+        assert_eq!(
+            mode(
+                r#"<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><body>x"#
+            ),
+            DocumentMode::NoQuirks
+        );
+        assert_eq!(mode("<!DOCTYPE html junk><body>x"), DocumentMode::Quirks);
     }
 }

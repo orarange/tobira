@@ -43,7 +43,7 @@ Current capabilities:
   - `getComputedStyle(...)` snapshots for common layout-sensitive values
 - Lightweight GUI window with `winit`
 - Software rendering with `softbuffer`
-- System font rendering with TrueType / OpenType fonts via `fontdue`
+- System font rendering with TrueType / OpenType fonts via `ab_glyph` (outlines read lazily, so a face costs about its file size)
 - Background page loading and content rendering workers keep the title bar and address bar responsive while navigation is in flight
 - Plain text CLI renderer with `--cli`
 - JavaScript execution via a from-scratch bytecode engine (`src/engine/`) & sandboxed DOM/API support:

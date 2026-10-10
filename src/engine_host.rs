@@ -350,6 +350,11 @@ pub struct BrowserHost {
     /// the stylesheet rather than on any element.
     root_custom_properties: std::collections::BTreeMap<String, String>,
     structural_changes: Vec<DomStructuralChange>,
+    /// The page's doctype, written out again in front of the snapshot. This
+    /// DOM does not hold it, and the snapshot is parsed again for layout:
+    /// without it every page that ran a script was laid out in quirks mode,
+    /// whatever it declared.
+    doctype_source: Option<String>,
 }
 
 impl BrowserHost {
@@ -389,6 +394,13 @@ impl BrowserHost {
             computed_styles: HashMap::new(),
             root_custom_properties: std::collections::BTreeMap::new(),
             structural_changes: Vec::new(),
+            doctype_source: match &root {
+                Node::Element(element) => element.children.iter().find_map(|child| match child {
+                    Node::Doctype(doctype) => crate::html::doctype_source(doctype),
+                    _ => None,
+                }),
+                _ => None,
+            },
         };
         host.document = host.push(DomNode::document());
         // The parsed root is an "document" element; graft its children under
@@ -816,7 +828,11 @@ impl BrowserHost {
     /// which is what the shadow tree's `<style>` rules are rewritten to
     /// select, so they reach their own tree and nothing else.
     pub fn serialize_document(&self) -> String {
-        self.render_node(self.document)
+        let body = self.render_node(self.document);
+        match &self.doctype_source {
+            Some(doctype) => format!("{doctype}{body}"),
+            None => body,
+        }
     }
 
     /// The document as a page's script sees it: light children only, no
@@ -1294,10 +1310,18 @@ impl BrowserHost {
         self.navigation.clone()
     }
 
-    /// A same-document navigation (hash / pushState / popstate) requested this
-    /// turn, if any. The browser updates the URL + history without reloading.
-    pub fn soft_navigation_target(&self) -> Option<String> {
-        self.soft_navigation.clone()
+    /// A same-document navigation (hash / pushState / popstate) requested
+    /// since the last snapshot, if any. The browser updates the URL + history
+    /// without reloading.
+    ///
+    /// Handed over once: a snapshot reports it and it is gone. Left in
+    /// place, one `history.replaceState` at hydration made every later frame
+    /// in which a timer ran look like a navigation, so the browser
+    /// serialized and rebuilt the whole document each time although nothing
+    /// had changed ("not eligible for incremental (changes: 0)" in
+    /// `TOBIRA_TIME_LAYOUT=1`; `tools/scripterr/softnav.html`).
+    pub fn take_soft_navigation_target(&mut self) -> Option<String> {
+        self.soft_navigation.take()
     }
 
     /// Resolve a (possibly relative) URL against the current document URL.
@@ -5499,7 +5523,7 @@ impl EngineSession {
         let host = self.host();
         let structural_changes = host.take_structural_changes();
         let navigation_target = host.navigation_target();
-        let soft_navigation_target = host.soft_navigation_target();
+        let soft_navigation_target = host.take_soft_navigation_target();
         let is_noop = !force_full
             && structural_changes.is_empty()
             && navigation_target.is_none()
@@ -8520,6 +8544,30 @@ mod tests {
         );
         assert!(!mutated.structural_changes.is_empty());
         assert!(mutated.html.contains("data-x"));
+    }
+
+    /// A router's `history.replaceState` is reported once. It used to stay
+    /// set, so every later frame in which a timer ran was treated as a
+    /// navigation and the browser rebuilt the whole document for nothing.
+    #[test]
+    fn soft_navigation_is_reported_once() {
+        let html = r#"<html><body><p>x</p><script>
+            history.replaceState({}, '', '/app');
+            var n = 0;
+            setInterval(function () { n++; }, 16);
+        </script></body></html>"#;
+        let (mut session, initial) = EngineSession::start(html, "http://localhost/");
+        assert_eq!(
+            initial.soft_navigation_target.as_deref(),
+            Some("http://localhost/app")
+        );
+        assert!(session.pump(100), "the interval should have run");
+        let frame = session.snapshot_lazy();
+        assert!(frame.soft_navigation_target.is_none());
+        assert!(
+            frame.html.is_empty(),
+            "a frame that changed nothing must stay a no-op after replaceState"
+        );
     }
 
     /// Find the `data-tobira-node-id` of the first element with `attr == value`

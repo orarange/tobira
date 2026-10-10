@@ -1,0 +1,19 @@
+<html><head><style>body{margin:0;font:16px Arial;width:800px}
+#t2 td{border:1px solid #000;padding:2px}
+#t3{border:3px solid red;padding:4px}
+#t5{border-spacing:5px 10px}
+#t7{width:300px;border:2px solid #000}
+</style></head><body>
+<table id="t1"><tr><td id="a">a</td><td id="b">b</td></tr><tr><td id="c">c</td><td>d</td></tr></table>
+<table id="t2"><tr><td id="d">a</td><td id="e">b</td></tr></table>
+<table id="t3"><tr><td id="f">a</td><td id="g">b</td></tr></table>
+<table id="t4" border="1"><tr><td id="h">a</td><td id="i">b</td></tr></table>
+<table id="t5"><tr><td id="j">a</td><td id="k">b</td></tr><tr><td id="l">c</td><td>d</td></tr></table>
+<table id="t6" cellspacing="0"><tr><td id="m">a</td><td id="n">b</td></tr></table>
+<table id="t7"><tr><td id="o">a</td><td id="p">b</td></tr></table>
+<table id="t8" border="3" cellspacing="6" cellpadding="4"><tr><td id="q">a</td><td id="r">b</td></tr></table>
+<div id="z">after</div>
+<pre id="out"></pre>
+<script>
+document.getElementById('out').textContent='t1 a b c t2 d e t3 f g t4 h i t5 j k l t6 m n t7 o p t8 q r z'.split(' ').map(function(id){var r=document.getElementById(id).getBoundingClientRect();return id+' '+Math.round(r.x)+','+Math.round(r.y)+' '+Math.round(r.width)+'x'+Math.round(r.height);}).join('\n');
+</script></body></html>

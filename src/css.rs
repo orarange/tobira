@@ -4,7 +4,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::{Mutex, OnceLock};
 
-use crate::html::{Element, Node};
+use crate::html::{DocumentMode, Element, Node};
 
 mod color;
 pub use color::parse_color;
@@ -1377,6 +1377,8 @@ pub fn computed_property_string(
         "line-height" => {
             if style.line_height == 0 {
                 "normal".to_string()
+            } else if style.line_height_fixed_mpx > 0 {
+                css_px_string(style.line_height_fixed_mpx)
             } else {
                 css_px_string(
                     ((style.font_size_mpx as u64 * style.line_height as u64) / 1000) as u32,
@@ -1550,11 +1552,15 @@ pub struct ComputedStyle {
     /// `word-break: break-all` each turn it on, and pages that hold long URLs
     /// or identifiers say so.
     pub break_long_words: bool,
-    /// How far the text is lifted off the line's baseline, in pixels.
+    /// How far the text is lifted off the line's baseline, in 64ths of a
+    /// pixel -- Chrome's `LayoutUnit`.
     ///
-    /// Negative is up. `<sup>` and `<sub>` are the only things that set it, and
-    /// they are why a footnote marker or the 2 in H2O sits where it does.
-    pub baseline_shift: i32,
+    /// Negative is up. `<sup>` / `<sub>` and `vertical-align: super / sub` set
+    /// it, and they are why a footnote marker or the 2 in H2O sits where it
+    /// does. Kept fractional because Chrome's lift is: a third of the parent's
+    /// size plus a pixel, 6.328125px at 16px. Held in whole pixels it lost the
+    /// third of a pixel on every superscripted line.
+    pub baseline_shift_lu: i32,
     pub text_overflow_ellipsis: bool,
     pub text_shadow: Option<TextShadow>,
     pub background_gradient: Option<LinearGradient>,
@@ -1580,7 +1586,24 @@ pub struct ComputedStyle {
     pub outline_width: u32,
     pub outline_color: Option<Color>,
     /// line-height in thousandths of em; 0 = "normal"
+    ///
+    /// Always relative to this element's own font size by the time the style
+    /// is finished, whatever it was written as -- the layout multiplies it by
+    /// `font_size_mpx` and nothing else.
     pub line_height: u32,
+    /// A `line-height` given as a length, as a length: what a child inherits.
+    /// Zero when it was a number or `normal`, which inherit as a ratio.
+    ///
+    /// A length used to be turned into a ratio of the font size it was written
+    /// beside and inherited as that ratio. `line-height: 40px` on a 16px line
+    /// then gave a 32px `<span>` inside it an 80px line where every browser
+    /// gives it 40, and `font-size: 32px; line-height: 40px` on one element
+    /// divided by the parent's size instead of its own.
+    pub line_height_fixed_mpx: u32,
+    /// `em` and `%` are of this element's own font size, which may be set by
+    /// a later declaration than the `line-height` one; resolved when the
+    /// style is finished.
+    pub line_height_em_pending: bool,
     /// opacity 0–255; 255 = opaque
     pub opacity: u8,
     pub effective_opacity: u8,
@@ -1740,6 +1763,19 @@ pub struct ComputedStyle {
     /// table, which is why a `td { padding }` in the page overrides it
     /// rather than adding to it.
     pub table_cellpadding: Option<u32>,
+    /// `border-collapse: collapse`: a table's cells share the borders between
+    /// them rather than each drawing its own. Inherited, as in CSS.
+    pub border_collapse: bool,
+    /// `border-spacing`: the gap between a separated table's cells, across
+    /// and down, and between them and the table's padding. Inherited, as in
+    /// CSS; the UA stylesheet gives a `<table>` 2px, and `cellspacing`
+    /// replaces it.
+    pub border_spacing_x: u32,
+    pub border_spacing_y: u32,
+    /// The table this element sits in has a `border` attribute, which gives
+    /// every cell in it a 1px border of its own (the UA stylesheet's
+    /// `table[border] td`).
+    pub table_cell_borders: bool,
     /// The gap between columns.
     ///
     /// `gap` sets two: the first length is between rows, the second
@@ -1784,6 +1820,10 @@ impl ComputedStyle {
             margin_right_auto: false,
             padding: EdgeSizes::default(),
             table_cellpadding: parent.and_then(|parent| parent.table_cellpadding),
+            border_collapse: parent.is_some_and(|parent| parent.border_collapse),
+            border_spacing_x: parent.map_or(0, |parent| parent.border_spacing_x),
+            border_spacing_y: parent.map_or(0, |parent| parent.border_spacing_y),
+            table_cell_borders: parent.is_some_and(|parent| parent.table_cell_borders),
             column_gap: 0,
             grid_auto_flow_column: false,
             justify_items: AlignItems::Stretch,
@@ -1806,7 +1846,7 @@ impl ComputedStyle {
             break_long_words: parent.map(|s| s.break_long_words).unwrap_or(false),
             // Not inherited: a `<sup>` inside a `<sup>` is raised once more
             // from where the outer one put it, not twice from the baseline.
-            baseline_shift: 0,
+            baseline_shift_lu: 0,
             text_overflow_ellipsis: false,
             text_shadow: None,
             background_gradient: None,
@@ -1830,6 +1870,8 @@ impl ComputedStyle {
             outline_width: 0,
             outline_color: None,
             line_height: parent.map(|s| s.line_height).unwrap_or(0),
+            line_height_fixed_mpx: parent.map(|s| s.line_height_fixed_mpx).unwrap_or(0),
+            line_height_em_pending: false,
             opacity: 255,
             effective_opacity: 255,
             font_style_italic: parent.map(|s| s.font_style_italic).unwrap_or(false),
@@ -1972,14 +2014,16 @@ impl ComputedStyle {
             "strong" | "b" => {
                 style.font_weight = true;
             }
-            // Smaller type, lifted off the baseline. The size is the browser's
-            // own `smaller`, and the lift is a third of the surrounding type --
-            // which is what puts a footnote marker beside the word rather than
-            // in the middle of it.
+            // Smaller type, lifted off the baseline: the UA sheet's
+            // `font-size: smaller; vertical-align: super` (or `sub`). The lift
+            // is measured from the surrounding type, not the smaller one.
             "sup" | "sub" => {
-                style.font_size_mpx = (parent_font_size_mpx * 83 / 100).max(1);
-                let shift = (mpx_to_px(parent_font_size_mpx) * 33 / 100) as i32;
-                style.baseline_shift = if tag_name == "sup" { -shift } else { shift / 2 };
+                style.font_size_mpx = smaller_font_size(parent_font_size_mpx);
+                style.baseline_shift_lu = if tag_name == "sup" {
+                    super_shift_lu(parent_font_size_mpx)
+                } else {
+                    sub_shift_lu(parent_font_size_mpx)
+                };
             }
             "small" => {
                 style.font_size_mpx = parent_font_size_mpx
@@ -1989,8 +2033,38 @@ impl ComputedStyle {
             "big" => {
                 style.font_size_mpx = parent_font_size_mpx.saturating_add(2 * MPX);
             }
+            "table" => {
+                style.border_spacing_x = 2;
+                style.border_spacing_y = 2;
+                style.table_cell_borders = false;
+                // The quirks-mode UA stylesheet: a table does not inherit the
+                // text settings round it. Font size, weight and style, line
+                // height, alignment and `white-space` go back to their
+                // initial values; colour and font family still inherit.
+                // Checked against Chrome, which makes a cell in a 20px bold
+                // italic centred body 16px, normal and left-aligned on a page
+                // with no doctype, and leaves it alone on one with
+                // `<!DOCTYPE html>` or an XHTML 1.0 one. Old pages with no
+                // doctype set their body type large and their tables came out
+                // in it, rows taller than any browser makes them.
+                if quirks_mode() {
+                    style.font_size_mpx = INITIAL_FONT_SIZE_MPX;
+                    style.font_weight = false;
+                    style.font_style_italic = false;
+                    style.line_height = 0;
+                    style.line_height_fixed_mpx = 0;
+                    style.line_height_em_pending = false;
+                    style.text_align = TextAlign::Left;
+                    style.white_space = WhiteSpaceMode::Normal;
+                }
+            }
             "td" | "th" => {
                 style.vertical_align = VerticalAlign::Middle;
+                if style.table_cell_borders {
+                    style.border = EdgeSizes::all(1);
+                    style.border_color = TABLE_BORDER_GRAY;
+                    style.border_style_none = false;
+                }
                 // The UA stylesheet gives a cell a pixel on every side,
                 // and `cellpadding` on the table replaces that number.
                 // Both sit below the page's own rules, so a `td { padding }`
@@ -3206,6 +3280,16 @@ thread_local! {
     static ROOT_FONT_SIZE_MPX: Cell<u32> = const { Cell::new(INITIAL_FONT_SIZE_MPX) };
 }
 
+thread_local! {
+    /// Whether the document being styled is in quirks mode, which the UA
+    /// stylesheet reads for its quirks rules. Set with the root font size.
+    static QUIRKS_MODE: Cell<bool> = const { Cell::new(false) };
+}
+
+fn quirks_mode() -> bool {
+    QUIRKS_MODE.with(Cell::get)
+}
+
 fn root_font_size_mpx() -> u32 {
     ROOT_FONT_SIZE_MPX.with(|size| size.get())
 }
@@ -3225,6 +3309,9 @@ fn establish_root_font_size(
     interactive: &InteractiveState,
 ) {
     ROOT_FONT_SIZE_MPX.with(|size| size.set(INITIAL_FONT_SIZE_MPX));
+    QUIRKS_MODE.with(|quirks| {
+        quirks.set(crate::html::document_mode(document) == DocumentMode::Quirks)
+    });
     let Some(root) = root_element(document) else {
         return;
     };
@@ -4477,8 +4564,73 @@ fn compute_style_with_rules(
 
     blockify(&mut style, parent_style);
     apply_monospace_default_size(&mut style);
+    finish_line_height(&mut style);
 
     style
+}
+
+/// Settle `line-height` against this element's final font size: a pending
+/// `em` / `%` becomes a length, and a length -- declared here or inherited --
+/// becomes the ratio the layout reads.
+fn finish_line_height(style: &mut ComputedStyle) {
+    if style.line_height_em_pending {
+        style.line_height_em_pending = false;
+        style.line_height_fixed_mpx =
+            (u64::from(style.font_size_mpx) * u64::from(style.line_height) / 1000) as u32;
+    }
+    if style.line_height_fixed_mpx > 0 && style.font_size_mpx > 0 {
+        let ratio = (u64::from(style.line_height_fixed_mpx) * 1000
+            + u64::from(style.font_size_mpx) / 2)
+            / u64::from(style.font_size_mpx);
+        style.line_height = (ratio.min(u64::from(u32::MAX))).max(1) as u32;
+    }
+}
+
+/// Apply a `line-height` value. A number is kept as a ratio and inherits as
+/// one; a length is kept as a length and inherits as one; `em` and `%` are
+/// lengths of this element's own font size, worked out in
+/// [`finish_line_height`]. Anything unreadable leaves the property alone, as
+/// an invalid declaration does.
+fn set_line_height(style: &mut ComputedStyle, input: &str, parent_font_size_mpx: u32) {
+    let v = input.trim().to_ascii_lowercase();
+    if v == "normal" {
+        style.line_height = 0;
+        style.line_height_fixed_mpx = 0;
+        style.line_height_em_pending = false;
+        return;
+    }
+    if let Ok(f) = v.parse::<f32>() {
+        if f >= 0.0 {
+            style.line_height = (f * 1000.0).round() as u32;
+            style.line_height_fixed_mpx = 0;
+            style.line_height_em_pending = false;
+        }
+        return;
+    }
+    let relative = if let Some(rest) = v.strip_suffix('%') {
+        parse_float(rest).map(|f| f * 10.0)
+    } else if v.ends_with("em") && !v.ends_with("rem") {
+        parse_float(v.trim_end_matches("em")).map(|f| f * 1000.0)
+    } else {
+        None
+    };
+    if let Some(per_mille) = relative {
+        if per_mille >= 0.0 {
+            style.line_height = (per_mille.round() as u32).max(1);
+            style.line_height_fixed_mpx = 0;
+            style.line_height_em_pending = true;
+        }
+        return;
+    }
+    if let Some(length) = parse_length_mpx(&v, parent_font_size_mpx)
+        && length > 0
+    {
+        style.line_height_fixed_mpx = length;
+        style.line_height_em_pending = false;
+        // Made relative in `finish_line_height`; non-zero here so nothing in
+        // between reads it as `normal`.
+        style.line_height = 1;
+    }
 }
 
 /// Monospace text nobody has given a size to is 13px, not 16px.
@@ -5318,9 +5470,31 @@ fn apply_declaration(style: &mut ComputedStyle, declaration: &Declaration, paren
                 style.text_align = text_align;
             }
         }
+        "border-spacing" => {
+            let lengths: Vec<u32> = value
+                .split_whitespace()
+                .filter_map(|part| parse_length(part, parent_font_size_mpx))
+                .collect();
+            match lengths.as_slice() {
+                [both] => {
+                    style.border_spacing_x = *both;
+                    style.border_spacing_y = *both;
+                }
+                [across, down] => {
+                    style.border_spacing_x = *across;
+                    style.border_spacing_y = *down;
+                }
+                _ => {}
+            }
+        }
+        "border-collapse" => match value.trim().to_ascii_lowercase().as_str() {
+            "collapse" => style.border_collapse = true,
+            "separate" => style.border_collapse = false,
+            _ => {}
+        },
         "vertical-align" => {
             // `super` and `sub` are not a box alignment at all -- they shift the
-            // box off the line's baseline, which is what `baseline_shift`
+            // box off the line's baseline, which is what `baseline_shift_lu`
             // already does for the `<sup>` and `<sub>` tags. Only the four
             // alignment keywords were understood, so `vertical-align: super`
             // was dropped and the box sat flat on the baseline: on
@@ -5332,12 +5506,11 @@ fn apply_declaration(style: &mut ComputedStyle, declaration: &Declaration, paren
             // `sup { vertical-align: baseline }` puts a footnote marker back on
             // the line the way a page that writes it expects.
             let keyword = value.trim().to_ascii_lowercase();
-            let em_third = (mpx_to_px(parent_font_size_mpx) * 33 / 100) as i32;
             match keyword.as_str() {
-                "super" => style.baseline_shift = -em_third,
-                "sub" => style.baseline_shift = em_third / 2,
+                "super" => style.baseline_shift_lu = super_shift_lu(parent_font_size_mpx),
+                "sub" => style.baseline_shift_lu = sub_shift_lu(parent_font_size_mpx),
                 "baseline" => {
-                    style.baseline_shift = 0;
+                    style.baseline_shift_lu = 0;
                     style.vertical_align = VerticalAlign::Baseline;
                 }
                 _ => {
@@ -5552,7 +5725,7 @@ fn apply_declaration(style: &mut ComputedStyle, declaration: &Declaration, paren
             style.outline_color = parse_color(value);
         }
         "line-height" => {
-            style.line_height = parse_line_height(value, parent_font_size_mpx);
+            set_line_height(style, value, parent_font_size_mpx);
         }
         "opacity" => {
             if let Ok(f) = value.trim().parse::<f32>() {
@@ -6239,6 +6412,9 @@ fn default_margin(tag_name: &str) -> SignedEdgeSizes {
 // Legacy HTML attributes
 // ─────────────────────────────────────────────────────────────────────────────
 
+/// The grey the UA stylesheet draws a `border` attribute's lines in.
+const TABLE_BORDER_GRAY: Color = 0x808080;
+
 fn apply_legacy_attributes(style: &mut ComputedStyle, element: &Element, parent_font_size_mpx: u32) {
     // `open` is what unfolds a `<details>`; its value does not matter, only
     // whether it is written at all.
@@ -6264,6 +6440,26 @@ fn apply_legacy_attributes(style: &mut ComputedStyle, element: &Element, parent_
         style.table_cellpadding = element
             .attribute("cellpadding")
             .and_then(|value| value.trim().parse::<u32>().ok());
+        if let Some(spacing) = element
+            .attribute("cellspacing")
+            .and_then(|value| value.trim().parse::<u32>().ok())
+        {
+            style.border_spacing_x = spacing;
+            style.border_spacing_y = spacing;
+        }
+        // `<table border="3">`: a 3px border round the table and a pixel
+        // round every cell, both grey (Chrome draws them outset and inset;
+        // here they are flat). An empty value counts as 1; `border="0"`
+        // turns both off.
+        if let Some(value) = element.attribute("border") {
+            let width = value.trim().parse::<u32>().unwrap_or(1);
+            if width > 0 {
+                style.border = EdgeSizes::all(width);
+                style.border_color = TABLE_BORDER_GRAY;
+                style.border_style_none = false;
+                style.table_cell_borders = true;
+            }
+        }
     }
 
     if let Some(width) = element
@@ -8122,46 +8318,6 @@ fn parse_box_shadow(value: &str, font_size_mpx: u32) -> Option<BoxShadow> {
     })
 }
 
-fn parse_line_height(input: &str, parent_font_size_mpx: u32) -> u32 {
-    let v = input.trim().to_ascii_lowercase();
-    if v == "normal" {
-        return 0;
-    }
-    // unitless multiplier
-    if let Ok(f) = v.parse::<f32>() {
-        return (f * 1000.0).round() as u32;
-    }
-    // px
-    if let Some(rest) = v.strip_suffix("px") {
-        if let Some(px) = parse_float(rest) {
-            // store as em thousandths relative to parent_font_size_mpx
-            // `line-height` is kept as a ratio in thousandths, so a length
-            // has to be divided by the font size it sits on -- in pixels, not
-            // in thousandths of one.
-            let basis = if parent_font_size_mpx > 0 {
-                mpx_to_f32(parent_font_size_mpx)
-            } else {
-                mpx_to_f32(INITIAL_FONT_SIZE_MPX)
-            };
-            let em = px / basis;
-            return (em * 1000.0).round() as u32;
-        }
-    }
-    // em
-    if let Some(rest) = v.strip_suffix("em") {
-        if let Some(f) = parse_float(rest) {
-            return (f * 1000.0).round() as u32;
-        }
-    }
-    // %
-    if let Some(rest) = v.strip_suffix('%') {
-        if let Some(f) = parse_float(rest) {
-            return (f * 10.0).round() as u32; // percent/100 * 1000
-        }
-    }
-    0
-}
-
 /// Parse a border shorthand like "1px solid red" or "none"
 fn parse_border_shorthand(style: &mut ComputedStyle, value: &str, parent_font_size_mpx: u32) {
     let v = value.trim().to_ascii_lowercase();
@@ -8297,7 +8453,7 @@ fn parse_font_shorthand(style: &mut ComputedStyle, value: &str, parent_font_size
                 style.font_size_is_medium = font_size_keeps_the_default_basis(parts[0]);
             }
             if parts.len() > 1 {
-                style.line_height = parse_line_height(parts[1], style.font_size_mpx);
+                set_line_height(style, parts[1], parent_font_size_mpx);
             }
             continue;
         }
@@ -8425,10 +8581,32 @@ fn parse_font_size(input: &str, parent_font_size_mpx: u32) -> Option<u32> {
         "large" => Some(20 * MPX),
         "x-large" => Some(24 * MPX),
         "xx-large" => Some(32 * MPX),
-        "smaller" => Some(parent_font_size_mpx.saturating_sub(2 * MPX).max(8 * MPX)),
-        "larger" => Some(parent_font_size_mpx.saturating_add(2 * MPX)),
+        "smaller" => Some(smaller_font_size(parent_font_size_mpx)),
+        "larger" => Some((u64::from(parent_font_size_mpx) * 12 / 10).min(u64::from(u32::MAX)) as u32),
         _ => parse_length_mpx(&value, parent_font_size_mpx),
     }
+}
+
+/// `font-size: smaller` -- the parent's size over 1.2, as Chrome computes it.
+/// It was two pixels less, so a `<sup>` in 24px type came out 22px where
+/// Chrome makes it 20 (checked on `tools/geom/supshift.html`).
+fn smaller_font_size(parent_font_size_mpx: u32) -> u32 {
+    (u64::from(parent_font_size_mpx) * 10 / 12).max(1) as u32
+}
+
+/// How far `vertical-align: super` lifts a box: a third of the parent's font
+/// size and a pixel, in 64ths of a pixel with the third floored to one --
+/// Chrome's arithmetic, which puts a superscript in 16px type 6.328125px up.
+fn super_shift_lu(parent_font_size_mpx: u32) -> i32 {
+    let parent_lu = i64::from(parent_font_size_mpx) * 64 / i64::from(MPX);
+    -((parent_lu / 3 + 64) as i32)
+}
+
+/// How far `vertical-align: sub` drops a box: a fifth of the parent's font
+/// size and a pixel, 4.1875px in 16px type.
+fn sub_shift_lu(parent_font_size_mpx: u32) -> i32 {
+    let parent_lu = i64::from(parent_font_size_mpx) * 64 / i64::from(MPX);
+    (parent_lu / 5 + 64) as i32
 }
 
 fn parse_legacy_font_size(input: &str, parent_font_size_mpx: u32) -> Option<u32> {
@@ -9983,13 +10161,13 @@ mod tests {
         );
         let sup = find_first_element(&styled, "sup").expect("the sup should exist");
         let sub = find_first_element(&styled, "sub").expect("the sub should exist");
-        assert_eq!(
-            sup.style.font_size_mpx,
-            132_800,
-            "83% of 16px, kept to the fraction rather than rounded to 13"
-        );
-        assert!(sup.style.baseline_shift < 0, "a superscript is lifted");
-        assert!(sub.style.baseline_shift > 0, "a subscript is dropped");
+        // Chrome's `smaller`: 16px over 1.2, kept to the fraction.
+        assert_eq!(sup.style.font_size_mpx, 133_333);
+        // Lifted a third of the surrounding 16px and a pixel (6.328125px),
+        // dropped a fifth and a pixel (4.1875px), in 64ths of a pixel --
+        // checked against Chrome on `tools/geom/supshift.html`.
+        assert_eq!(sup.style.baseline_shift_lu, -405);
+        assert_eq!(sub.style.baseline_shift_lu, 268);
     }
 
     /// `vertical-align: super` and `sub` shift a box off the baseline; they are
@@ -10026,12 +10204,12 @@ mod tests {
         };
         let up = by_id("up");
         let down = by_id("down");
-        assert!(up.style.baseline_shift < 0, "super lifts: {up:?}");
-        assert!(down.style.baseline_shift > 0, "sub drops: {down:?}");
+        assert!(up.style.baseline_shift_lu < 0, "super lifts: {up:?}");
+        assert!(down.style.baseline_shift_lu > 0, "sub drops: {down:?}");
         assert_eq!(up.style.font_size_mpx, 16 * MPX, "the keyword leaves the size alone");
         assert_eq!(down.style.font_size_mpx, 16 * MPX);
         // `baseline` is the initial value, so it has to undo the tag's lift.
-        assert_eq!(by_id("flat").style.baseline_shift, 0);
+        assert_eq!(by_id("flat").style.baseline_shift_lu, 0);
     }
 
     /// `hidden` is how a page hides something without writing any CSS for it,

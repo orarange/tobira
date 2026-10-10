@@ -6,7 +6,7 @@ use font8x8::{
     BASIC_FONTS, BLOCK_FONTS, BOX_FONTS, GREEK_FONTS, HIRAGANA_FONTS, LATIN_FONTS, MISC_FONTS,
     UnicodeFonts,
 };
-use fontdue::{Font, FontSettings};
+use ab_glyph::{Font as _, FontRef, FontVec, PxScale, ScaleFont as _};
 use unicode_width::UnicodeWidthChar;
 
 use crate::css::{Color, FontFamilyKind};
@@ -173,13 +173,88 @@ pub fn family_is_installed(lowercase_name: &str) -> bool {
     answer
 }
 
+/// Families a page names, and the metric-compatible faces a Linux machine has
+/// for them -- the substitutions fontconfig makes, which is what Chrome draws
+/// with there. Without them every `font-family: Arial` on Linux fell to the
+/// generic sans (DejaVu Sans, about 15% wider), so no probe that names Arial
+/// could be compared with Chrome on Linux at all.
+const UNIX_FAMILY_FILES: &[(&str, &str, &str)] = &[
+    (
+        "arial",
+        "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
+        "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
+    ),
+    (
+        "helvetica",
+        "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
+        "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
+    ),
+    (
+        "liberation sans",
+        "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
+        "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
+    ),
+    (
+        "times new roman",
+        "/usr/share/fonts/truetype/liberation/LiberationSerif-Regular.ttf",
+        "/usr/share/fonts/truetype/liberation/LiberationSerif-Bold.ttf",
+    ),
+    (
+        "times",
+        "/usr/share/fonts/truetype/liberation/LiberationSerif-Regular.ttf",
+        "/usr/share/fonts/truetype/liberation/LiberationSerif-Bold.ttf",
+    ),
+    (
+        "liberation serif",
+        "/usr/share/fonts/truetype/liberation/LiberationSerif-Regular.ttf",
+        "/usr/share/fonts/truetype/liberation/LiberationSerif-Bold.ttf",
+    ),
+    (
+        "courier new",
+        "/usr/share/fonts/truetype/liberation/LiberationMono-Regular.ttf",
+        "/usr/share/fonts/truetype/liberation/LiberationMono-Bold.ttf",
+    ),
+    (
+        "courier",
+        "/usr/share/fonts/truetype/liberation/LiberationMono-Regular.ttf",
+        "/usr/share/fonts/truetype/liberation/LiberationMono-Bold.ttf",
+    ),
+    (
+        "liberation mono",
+        "/usr/share/fonts/truetype/liberation/LiberationMono-Regular.ttf",
+        "/usr/share/fonts/truetype/liberation/LiberationMono-Bold.ttf",
+    ),
+    (
+        "dejavu sans",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+    ),
+    (
+        "dejavu serif",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSerif.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSerif-Bold.ttf",
+    ),
+    (
+        "dejavu sans mono",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSansMono-Bold.ttf",
+    ),
+];
+
 /// The path to a named family's file, if it is installed.
 fn named_family_file(lowercase_name: &str, bold: bool) -> Option<PathBuf> {
-    let (_, regular, bold_file) = WINDOWS_FAMILY_FILES
+    if cfg!(windows) {
+        let (_, regular, bold_file) = WINDOWS_FAMILY_FILES
+            .iter()
+            .find(|(name, _, _)| *name == lowercase_name)?;
+        let file = if bold { bold_file } else { regular };
+        let path = windows_font_dir()?.join(file);
+        return path.is_file().then_some(path);
+    }
+    let (_, regular, bold_file) = UNIX_FAMILY_FILES
         .iter()
         .find(|(name, _, _)| *name == lowercase_name)?;
-    let file = if bold { bold_file } else { regular };
-    let path = windows_font_dir()?.join(file);
+    let path = PathBuf::from(if bold { bold_file } else { regular });
     path.is_file().then_some(path)
 }
 
@@ -258,6 +333,8 @@ enum GlyphMode {
 #[derive(Debug, Clone, Copy)]
 struct CachedLineMetrics {
     ascent_px: i32,
+    ascent_round_px: i32,
+    descent_round_px: i32,
     /// How far the face reaches below the baseline, as a positive number.
     descent_px: u32,
     /// What `line-height: normal` comes to for this face and size: the font's
@@ -273,11 +350,11 @@ struct CachedLineMetrics {
 }
 
 impl FontContext {
-    /// No font file is read here. `fontdue` expands a font into roughly 40x its
-    /// file size when it parses one (measured: `segoeui.ttf` 960 KB -> 40.5 MB),
-    /// so eagerly loading sans + monospace + serif cost ~64 MB before a single
-    /// page was drawn. Each family is now read the first time something actually
-    /// asks for it, via [`Self::ensure_family_loaded`].
+    /// No font file is read here. Each family is read the first time something
+    /// actually asks for it, via [`Self::ensure_family_loaded`]. This dates from
+    /// `fontdue`, which expanded a face to about 40x its file (`segoeui.ttf`
+    /// 960 KB -> 40.5 MB); a face now costs about its file size (see [`Font`]),
+    /// but a file not read is still a file not held.
     pub fn load() -> Self {
         Self {
             sans_fonts: Vec::new(),
@@ -368,14 +445,11 @@ impl FontContext {
             }
             let cursor_x = cursor.round() as i32;
 
-            // Stepped by the regular cut's advance, not the bold one's. Layout
-            // measured this run before anything knew it would be drawn bold,
-            // and a wider step here would walk the text out of the box it was
-            // given.
-            let advance = self
-                .cached_glyph(character, font_size_mpx, font_family, false)
-                .advance;
+            // Stepped by the cut it is drawn in. Layout measures bold runs
+            // with the bold cut's advances as well, so the two agree; a face
+            // with no bold cut is smeared and keeps the regular advance.
             let glyph = self.cached_glyph(character, font_size_mpx, font_family, bold);
+            let advance = glyph.advance;
             let smear = glyph.synthetic_bold;
             draw_cached_glyph(buffer, width, height, cursor_x, y, glyph, color, clip_top);
 
@@ -415,7 +489,7 @@ impl FontContext {
                     height,
                     x.max(0) as u32,
                     underline_y as u32,
-                    self.text_width_px(text, font_size_mpx, font_family),
+                    self.text_width_px(text, font_size_mpx, font_family, bold),
                     (crate::css::mpx_to_px(font_size_mpx) / 12).max(1),
                     color,
                 );
@@ -432,7 +506,7 @@ impl FontContext {
                     height,
                     x.max(0) as u32,
                     line_through_y as u32,
-                    self.text_width_px(text, font_size_mpx, font_family),
+                    self.text_width_px(text, font_size_mpx, font_family, bold),
                     (crate::css::mpx_to_px(font_size_mpx) / 12).max(1),
                     color,
                 );
@@ -445,10 +519,13 @@ impl FontContext {
         character: char,
         font_size_mpx: u32,
         font_family: FontFamilyKind,
+        bold: bool,
     ) -> u32 {
-        // Measurement always uses the regular cut: layout is done before
-        // anything knows a run will be drawn bold, and the two have to agree.
-        self.cached_glyph(character, font_size_mpx, font_family, false)
+        // Measured in the cut it will be drawn in. Bold is wider: Arial Bold's
+        // advances run about a tenth past the regular's, and measuring a bold
+        // link with the regular cut put everything after it on the line short
+        // of where Chrome puts it.
+        self.cached_glyph(character, font_size_mpx, font_family, bold)
             .advance_px
     }
 
@@ -462,15 +539,36 @@ impl FontContext {
         text: &str,
         font_size_mpx: u32,
         font_family: FontFamilyKind,
+        bold: bool,
     ) -> u32 {
         let total: f32 = text
             .chars()
             .map(|character| {
-                self.cached_glyph(character, font_size_mpx, font_family, false)
+                self.cached_glyph(character, font_size_mpx, font_family, bold)
                     .advance
             })
             .sum();
         total.round() as u32
+    }
+
+    /// The same width in 64ths of a pixel, unrounded to whole ones: what a
+    /// line adds up run by run so that it rounds once, where it places each
+    /// run, instead of once per run.
+    pub fn text_width_lu(
+        &mut self,
+        text: &str,
+        font_size_mpx: u32,
+        font_family: FontFamilyKind,
+        bold: bool,
+    ) -> i64 {
+        let total: f32 = text
+            .chars()
+            .map(|character| {
+                self.cached_glyph(character, font_size_mpx, font_family, bold)
+                    .advance
+            })
+            .sum();
+        (total * 64.0).round() as i64
     }
 
     /// `line-height: normal`, which is the face's own recommended line
@@ -490,6 +588,26 @@ impl FontContext {
     /// apart two lines sit -- that one includes the face's line gap.
     pub fn content_height_px(&mut self, font_size_mpx: u32, font_family: FontFamilyKind) -> u32 {
         self.line_metrics(font_size_mpx, font_family).content_px.max(1)
+    }
+
+    /// The face's ascent and descent rounded to whole pixels, each on its own:
+    /// the two numbers a browser builds a line box from. The line's leading is
+    /// `line-height` minus their sum, and where the baseline falls inside the
+    /// line follows from them. Distinct from [`Self::descent_px`], which is
+    /// rounded up for the room the letters need.
+    pub fn rounded_ascent_descent_px(
+        &mut self,
+        font_size_mpx: u32,
+        font_family: FontFamilyKind,
+    ) -> (i32, i32) {
+        let metrics = self.line_metrics(font_size_mpx, font_family);
+        (metrics.ascent_round_px, metrics.descent_round_px)
+    }
+
+    /// Where the painter puts the baseline below the top it is handed: the
+    /// ascent rounded up, which is how far it hangs the letters down.
+    pub fn painted_ascent_px(&mut self, font_size_mpx: u32, font_family: FontFamilyKind) -> i32 {
+        self.line_metrics(font_size_mpx, font_family).ascent_px
     }
 
     /// How far below the baseline the face reaches, at this size.
@@ -522,6 +640,8 @@ impl FontContext {
                     .map(|line| CachedLineMetrics {
                         ascent_px: line.ascent.ceil() as i32,
                         descent_px: (-line.descent).ceil().max(0.0) as u32,
+                        ascent_round_px: line.ascent.round() as i32,
+                        descent_round_px: (-line.descent).round().max(0.0) as i32,
                         // Rounded apart and then added, which is what Chrome
                         // does -- for the line advance as well as the content
                         // area. Rounding the sum instead lands on a different
@@ -548,6 +668,12 @@ impl FontContext {
             })
             .unwrap_or(CachedLineMetrics {
                 ascent_px: crate::css::mpx_to_px(font_size_mpx) as i32,
+                // The same 1.15em of letters as below, a fifth of it under the
+                // baseline.
+                ascent_round_px: ((crate::css::mpx_to_f32(font_size_mpx) * 1.15).round()
+                    - (crate::css::mpx_to_f32(font_size_mpx) * 0.21).round())
+                    as i32,
+                descent_round_px: (crate::css::mpx_to_f32(font_size_mpx) * 0.21).round() as i32,
                 descent_px: (crate::css::mpx_to_f32(font_size_mpx) * 0.21).round() as u32,
                 // No face to ask: the ratio a browser lands on for the common
                 // text faces.
@@ -618,6 +744,12 @@ impl FontContext {
         // this character, drops through to the regular stack and is smeared.
         let mut synthetic_bold = bold;
         if bold {
+            // A named face's bold cut is only read when something asks for
+            // it, and `ensure_font_for` does not read named faces. Asked here
+            // first, or Arial Bold was never found: every bold run in a page
+            // that names Arial was the regular cut smeared, and measured with
+            // the regular cut's advances.
+            self.ensure_family_loaded(font_family, true);
             self.ensure_font_for(character, font_family, true);
             if self
                 .fonts_for(font_family, true)
@@ -741,7 +873,7 @@ impl FontContext {
             return fonts;
         }
         // A family with no installed candidate borrows sans rather than holding
-        // a copy of it: cloning a `fontdue::Font` would duplicate tens of MB.
+        // a copy of it: a face holds its whole file.
         if fonts.is_empty() {
             &self.sans_fonts
         } else {
@@ -905,6 +1037,109 @@ fn font_candidates(font_family: FontFamilyKind, bold: bool) -> Vec<PathBuf> {
     files.iter().map(PathBuf::from).collect()
 }
 
+/// A face, read from its file as it is used rather than all at once.
+///
+/// This was `fontdue::Font`, which turns every outline in the file into
+/// geometry the moment it is opened. For a Latin face that is 20-odd MB; for
+/// a Japanese one it is the whole cost of the page: `ipag.ttf` (6 MB, 12,728
+/// glyphs) came to +58 MiB and `wqy-zenhei.ttc` (16 MB, 44,960 glyphs) to
+/// +209 MiB and 0.7 CPU seconds, before one letter was drawn. On Windows
+/// `YuGothR.ttc` was the 275 MiB that five Japanese characters cost
+/// (`tools/scripterr/fontcost.html`). Here the face keeps the file's bytes and
+/// reads an outline when a glyph is rasterized, which the glyph cache then
+/// holds, so a face costs about its file size.
+///
+/// The interface is the three things the rest of this file used from
+/// `fontdue`, with the same numbers: advances, line metrics and glyph bounds
+/// were compared face by face and size by size and did not differ at all.
+/// Only the anti-aliased edge is drawn by another rasterizer; the total ink
+/// agrees to 0.2%.
+struct Font {
+    face: FontVec,
+    /// Font units per em over the face's own height unit: `ab_glyph` scales
+    /// by the height (ascent - descent), CSS by the em.
+    height_per_em: f32,
+}
+
+struct LineMetrics {
+    ascent: f32,
+    /// Negative, below the baseline.
+    descent: f32,
+    line_gap: f32,
+}
+
+struct GlyphMetrics {
+    advance_width: f32,
+    width: usize,
+    height: usize,
+    /// Left edge of the bitmap from the pen position.
+    xmin: i32,
+    /// Bottom edge of the bitmap from the baseline, upwards positive.
+    ymin: i32,
+}
+
+impl Font {
+    fn from_vec(bytes: Vec<u8>, index: u32) -> Option<Self> {
+        let face = FontVec::try_from_vec_and_index(bytes, index).ok()?;
+        let height_per_em = face.height_unscaled() / face.units_per_em()?;
+        Some(Self {
+            face,
+            height_per_em,
+        })
+    }
+
+    fn scale(&self, px: f32) -> PxScale {
+        PxScale::from(px * self.height_per_em)
+    }
+
+    fn has_glyph(&self, character: char) -> bool {
+        self.face.glyph_id(character).0 != 0
+    }
+
+    fn horizontal_line_metrics(&self, px: f32) -> Option<LineMetrics> {
+        let scaled = self.face.as_scaled(self.scale(px));
+        Some(LineMetrics {
+            ascent: scaled.ascent(),
+            descent: scaled.descent(),
+            line_gap: scaled.line_gap(),
+        })
+    }
+
+    /// The glyph's coverage, a byte a pixel, rows top to bottom.
+    fn rasterize(&self, character: char, px: f32) -> (GlyphMetrics, Vec<u8>) {
+        let scale = self.scale(px);
+        let id = self.face.glyph_id(character);
+        let advance_width = self.face.as_scaled(scale).h_advance(id);
+        let Some(outline) = self.face.outline_glyph(id.with_scale(scale)) else {
+            let metrics = GlyphMetrics {
+                advance_width,
+                width: 0,
+                height: 0,
+                xmin: 0,
+                ymin: 0,
+            };
+            return (metrics, Vec::new());
+        };
+        let bounds = outline.px_bounds();
+        let width = bounds.width() as usize;
+        let height = bounds.height() as usize;
+        let mut bitmap = vec![0u8; width * height];
+        outline.draw(|x, y, coverage| {
+            if let Some(cell) = bitmap.get_mut(y as usize * width + x as usize) {
+                *cell = (coverage.clamp(0.0, 1.0) * 255.0).round() as u8;
+            }
+        });
+        let metrics = GlyphMetrics {
+            advance_width,
+            width,
+            height,
+            xmin: bounds.min.x as i32,
+            ymin: -(bounds.max.y as i32),
+        };
+        (metrics, bitmap)
+    }
+}
+
 fn load_font_file(path: &Path) -> Option<Font> {
     if !path.is_file() {
         return None;
@@ -917,22 +1152,14 @@ fn load_font_file(path: &Path) -> Option<Font> {
         .unwrap_or_default()
         .to_ascii_lowercase();
 
-    if matches!(extension.as_str(), "ttc" | "otc") {
-        for collection_index in 0..4 {
-            if let Ok(font) = Font::from_bytes(
-                bytes.clone(),
-                FontSettings {
-                    collection_index,
-                    ..FontSettings::default()
-                },
-            ) {
-                return Some(font);
-            }
-        }
-        return None;
-    }
-
-    Font::from_bytes(bytes, FontSettings::default()).ok()
+    // A collection holds several faces; the first one that parses is taken.
+    // Each is tried on the borrowed bytes, so the file is not copied per try.
+    let index = if matches!(extension.as_str(), "ttc" | "otc") {
+        (0..4).find(|&index| FontRef::try_from_slice_and_index(&bytes, index).is_ok())?
+    } else {
+        0
+    };
+    Font::from_vec(bytes, index)
 }
 
 fn draw_cached_glyph(
@@ -1202,8 +1429,8 @@ mod tests {
     fn a_narrow_letter_is_narrower_than_a_wide_one_at_small_sizes() {
         let mut fonts = FontContext::load();
         for size in [8u32, 10, 12] {
-            let narrow = fonts.text_width_px("iiiiiiiiii", size, FontFamilyKind::Sans);
-            let wide = fonts.text_width_px("mmmmmmmmmm", size, FontFamilyKind::Sans);
+            let narrow = fonts.text_width_px("iiiiiiiiii", size, FontFamilyKind::Sans, false);
+            let wide = fonts.text_width_px("mmmmmmmmmm", size, FontFamilyKind::Sans, false);
             assert!(
                 narrow * 2 <= wide,
                 "at {size}px ten i's ({narrow}) should be well under ten m's ({wide})"
@@ -1217,8 +1444,8 @@ mod tests {
     fn a_run_grows_in_proportion_with_its_type() {
         let mut fonts = FontContext::load();
         let text = "Hamburgefonstiv";
-        let at_10 = fonts.text_width_px(text, 10 * MPX, FontFamilyKind::Sans) as f32;
-        let at_20 = fonts.text_width_px(text, 20 * MPX, FontFamilyKind::Sans) as f32;
+        let at_10 = fonts.text_width_px(text, 10 * MPX, FontFamilyKind::Sans, false) as f32;
+        let at_20 = fonts.text_width_px(text, 20 * MPX, FontFamilyKind::Sans, false) as f32;
         let ratio = at_20 / at_10;
         assert!(
             (ratio - 2.0).abs() < 0.15,
@@ -1247,8 +1474,8 @@ mod tests {
     fn invisible_characters_render_as_nothing() {
         let mut context = FontContext::load();
         for ch in ['\u{FE0F}', '\u{200B}', '\u{200D}', '\u{FEFF}'] {
-            let with = context.text_width_px(&format!("A{ch}B"), 18 * MPX, FontFamilyKind::Sans);
-            let without = context.text_width_px("AB", 18 * MPX, FontFamilyKind::Sans);
+            let with = context.text_width_px(&format!("A{ch}B"), 18 * MPX, FontFamilyKind::Sans, false);
+            let without = context.text_width_px("AB", 18 * MPX, FontFamilyKind::Sans, false);
             assert_eq!(
                 with, without,
                 "U+{:04X} should have zero advance",
@@ -1334,9 +1561,9 @@ mod lazy_loading_tests {
     use crate::css::MPX;
     use super::*;
 
-    /// `fontdue` expands a font to roughly 40x its file size when it parses one,
-    /// so `FontContext::load` must not touch the disk. Loading sans, monospace
-    /// and serif up front cost ~64 MB before anything was drawn.
+    /// `FontContext::load` must not touch the disk. Loading sans, monospace
+    /// and serif up front cost ~64 MB before anything was drawn under
+    /// `fontdue`, and still reads three files a page may never use.
     #[test]
     fn load_reads_no_font_files() {
         let fonts = FontContext::load();
@@ -1460,7 +1687,7 @@ mod lazy_loading_tests {
     }
 
     /// A family with no installed candidate borrows sans rather than cloning it;
-    /// cloning a `fontdue::Font` would duplicate tens of megabytes.
+    /// a face holds its whole file.
     #[test]
     fn empty_family_borrows_sans_without_copying() {
         let mut fonts = FontContext::load();
