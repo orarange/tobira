@@ -40,3 +40,13 @@ This file records any exception where Codex touches CSS-facing code or other fil
     使うのは layout の表だけ。
     理由: 一度も読んどらんかったので、collapse の表が線を二重に持って 1 行ごとに
     1px 高うなっとった（g2 で表より下が全部 +1）。
+
+- 2026-10-10 (Claude): separate の表のために `src/css.rs` を触った。
+  - Touched files: `src/css.rs`, `src/layout.rs`, `src/browser.rs`（テストの初期化子のみ）
+  - CSS engine files modified: `src/css.rs` — `border-spacing`（継承、
+    `ComputedStyle::border_spacing_x/y`）を読み、UA の `table { border-spacing: 2px }`
+    を `<table>` の既定に、`cellspacing` をその上書きにした。`<table border=N>` を
+    表の N px の灰色の枠と、セルの 1px の灰色の枠に写す（`table_cell_borders`、
+    Chrome は outset/inset やけどここでは平たい線）。
+    理由: 既定の 2px も表自身の枠と余白も数えとらんで、素の `<table>` が Chrome の
+    28x46 に対して 22x40 やった。`border="1"` の表は枠が一本も出んかった。

@@ -4343,10 +4343,29 @@ fn layout_table_element(
         .style
         .border_collapse
         .then(|| CollapsedLines::new(element, &placements, column_count, rows.len()));
-    let spacing = if lines.is_some() {
-        0
+    // A separated table is built out from its edge: its border, its
+    // padding, then `border-spacing` before the first cell, between every
+    // two, and after the last. None of the three was counted -- the UA's
+    // 2px spacing included -- so a plain `<table>` came out 22x40 where
+    // Chrome makes it 28x46, and a `border="1"` table lost its frame
+    // altogether. A collapsed table has none of them: its border is one of
+    // the lines, and padding and spacing do not apply.
+    let (spacing_x, spacing_y) = if lines.is_some() {
+        (0, 0)
     } else {
-        parse_dimension_attribute(element.attributes.get("cellspacing")).unwrap_or(0)
+        (element.style.border_spacing_x, element.style.border_spacing_y)
+    };
+    let frame = if lines.is_some() {
+        EdgeSizes::default()
+    } else {
+        let border = own_borders(&element.style);
+        let padding = element.style.padding;
+        EdgeSizes {
+            top: border.top + padding.top + spacing_y,
+            right: border.right + padding.right + spacing_x,
+            bottom: border.bottom + padding.bottom + spacing_y,
+            left: border.left + padding.left + spacing_x,
+        }
     };
     let overlap_x = lines.as_ref().map_or(0, |lines| lines.inner_columns(0, column_count));
     let overlap_y = lines.as_ref().map_or(0, |lines| lines.inner_rows(0, rows.len()));
@@ -4356,7 +4375,9 @@ fn layout_table_element(
     // left every cell two pixels short of what a browser gives it.
     let padding = 0;
     let available_width = width.max(1);
-    let track_total_spacing = spacing.saturating_mul(column_count.saturating_sub(1) as u32);
+    let track_total_spacing = spacing_x
+        .saturating_mul(column_count.saturating_sub(1) as u32)
+        .saturating_add(frame.left + frame.right);
     let content_limit = available_width
         .saturating_sub(track_total_spacing)
         .saturating_add(overlap_x)
@@ -4415,12 +4436,16 @@ fn layout_table_element(
         _ => x,
     };
 
+    // The table's own background and border go under its cells, at the
+    // place in the paint order the table starts; their size is known only
+    // once the rows are.
+    let table_paint_at = context.commands.len();
     let mut cell_layouts = Vec::with_capacity(placements.len());
     let mut next_control_id = context.next_control_id;
     let mut next_form_id = context.next_form_id;
     for placement in &placements {
         let span_width = span_width(&column_widths, placement.column_index, placement.colspan)
-            .saturating_add(spacing.saturating_mul(placement.colspan.saturating_sub(1) as u32))
+            .saturating_add(spacing_x.saturating_mul(placement.colspan.saturating_sub(1) as u32))
             .saturating_sub(lines.as_ref().map_or(0, |lines| {
                 lines.inner_columns(placement.column_index, placement.colspan)
             }));
@@ -4469,30 +4494,31 @@ fn layout_table_element(
         *height = (*height).max(1);
     }
 
-    let mut row_offsets = vec![0_u32; row_count];
+    let mut row_offsets = vec![frame.top; row_count];
     for index in 1..row_count {
         row_offsets[index] = row_offsets[index - 1]
             .saturating_add(row_heights[index - 1])
-            .saturating_add(spacing)
+            .saturating_add(spacing_y)
             .saturating_sub(lines.as_ref().map_or(0, |lines| lines.rows[index]));
     }
 
     let mut cell_boxes = Vec::with_capacity(placements.len());
     for (placement, layout) in placements.iter().zip(cell_layouts.iter()) {
         let cell_x = table_x
+            .saturating_add(frame.left)
             .saturating_add(span_width(&column_widths, 0, placement.column_index))
-            .saturating_add(spacing.saturating_mul(placement.column_index as u32))
+            .saturating_add(spacing_x.saturating_mul(placement.column_index as u32))
             .saturating_sub(lines.as_ref().map_or(0, |lines| {
                 lines.columns[1..=placement.column_index].iter().sum::<u32>()
             }));
         let cell_y = cursor_y.saturating_add(row_offsets[placement.row_index]);
         let cell_width = span_width(&column_widths, placement.column_index, placement.colspan)
-            .saturating_add(spacing.saturating_mul(placement.colspan.saturating_sub(1) as u32))
+            .saturating_add(spacing_x.saturating_mul(placement.colspan.saturating_sub(1) as u32))
             .saturating_sub(lines.as_ref().map_or(0, |lines| {
                 lines.inner_columns(placement.column_index, placement.colspan)
             }));
         let cell_height = cell_span_height(&row_heights, placement.row_index, placement.rowspan)
-            .saturating_add(spacing.saturating_mul(placement.rowspan.saturating_sub(1) as u32))
+            .saturating_add(spacing_y.saturating_mul(placement.rowspan.saturating_sub(1) as u32))
             .saturating_sub(lines.as_ref().map_or(0, |lines| {
                 lines.inner_rows(placement.row_index, placement.rowspan)
             }));
@@ -4730,8 +4756,17 @@ fn layout_table_element(
     }
 
     let table_height = (row_heights.iter().sum::<u32>()
-        + spacing.saturating_mul(row_count.saturating_sub(1) as u32))
-    .saturating_sub(overlap_y);
+        + spacing_y.saturating_mul(row_count.saturating_sub(1) as u32)
+        + frame.top
+        + frame.bottom)
+        .saturating_sub(overlap_y);
+    paint_table_box(
+        element,
+        lines.is_some(),
+        (table_x, *cursor_y, table_width, table_height),
+        table_paint_at,
+        context,
+    );
     // And the table's own box, for the same reason the cells needed one.
     if let Some(node_id) = element_node_id(element)
         && !element.style.pointer_events_none
@@ -4751,6 +4786,51 @@ fn layout_table_element(
     context.next_form_id = next_form_id;
     *cursor_y = cursor_y.saturating_add(table_height);
     *cursor_y = advance_by_margin(*cursor_y, element.style.margin.bottom);
+}
+
+/// Paint a table's own background, and in a separated table its border.
+/// Neither was drawn: a table is laid out by its cells, and nothing painted
+/// the box round them. A collapsed table's border is drawn by its cells as
+/// the outer lines.
+fn paint_table_box(
+    table: &StyledElement,
+    collapsed: bool,
+    (x, y, width, height): (u32, u32, u32, u32),
+    at: usize,
+    context: &mut LayoutContext,
+) {
+    let style = &table.style;
+    let mut rects = Vec::new();
+    if let Some(background) = style.background_color {
+        rects.push((
+            apply_opacity(background, context.background_color, style.effective_opacity),
+            (x, y, width, height),
+        ));
+    }
+    if !collapsed && !style.border_style_none && !style.border_color_transparent {
+        let color = apply_opacity(style.border_color, context.background_color, style.effective_opacity);
+        let border = style.border;
+        rects.push((color, (x, y, width, border.top)));
+        rects.push((color, (x, (y + height).saturating_sub(border.bottom), width, border.bottom)));
+        rects.push((color, (x, y, border.left, height)));
+        rects.push((color, ((x + width).saturating_sub(border.right), y, border.right, height)));
+    }
+    let commands: Vec<DrawCommand> = rects
+        .into_iter()
+        .filter(|(_, (_, _, width, height))| *width > 0 && *height > 0)
+        .map(|(color, (x, y, width, height))| {
+            DrawCommand::Rect(RectCommand {
+                x,
+                y,
+                width,
+                height,
+                color,
+                border_radius: Corners::ZERO,
+            })
+        })
+        .collect();
+    let at = at.min(context.commands.len());
+    context.commands.splice(at..at, commands);
 }
 
 /// A box's border widths, or none at all when its border style is `none`.
@@ -13754,6 +13834,38 @@ mod tests {
     }
 
     #[test]
+    fn a_separated_table_has_its_spacing_border_and_padding() {
+        // Checked against Chrome (`tools/geom/separate.html`). A plain table
+        // has 2px of spacing round and between its cells: 28x46 for two rows
+        // of 11x20. A 3px border and 4px of padding put the first cell at 9.
+        // `border="1"` frames the table and every cell. `cellspacing="0"`
+        // takes the spacing away.
+        let l = probe_layout(
+            r#"<html><body style="margin:0;font:16px Arial">
+                <table data-tobira-node-id="980"><tr><td data-tobira-node-id="981">a</td><td>b</td></tr><tr><td>c</td><td>d</td></tr></table>
+                <table style="border:3px solid red;padding:4px"><tr><td data-tobira-node-id="982">a</td><td>b</td></tr></table>
+                <table border="1" data-tobira-node-id="983"><tr><td data-tobira-node-id="984">a</td><td>b</td></tr></table>
+                <table cellspacing="0" data-tobira-node-id="985"><tr><td>a</td><td>b</td></tr></table>
+            </body></html>"#,
+            800,
+        );
+        let hitbox = |id: usize| {
+            let hitbox = l
+                .element_hitboxes
+                .iter()
+                .find(|hitbox| hitbox.node_id == id)
+                .expect("the box");
+            (hitbox.x, hitbox.y, hitbox.width, hitbox.height)
+        };
+        assert_eq!(hitbox(980), (0, 0, 28, 46));
+        assert_eq!(hitbox(981), (2, 2, 11, 20));
+        assert_eq!(hitbox(982), (9, 55, 11, 20));
+        assert_eq!(hitbox(983), (0, 84, 34, 28));
+        assert_eq!(hitbox(984), (3, 87, 13, 22));
+        assert_eq!(hitbox(985).2, 22);
+    }
+
+    #[test]
     fn collapsed_cells_share_the_lines_between_them() {
         // Checked against Chrome (`tools/geom/collapse.html`): two rows of
         // 1px-bordered cells with 2px padding make a 47px table, the first
@@ -14639,7 +14751,9 @@ mod tests {
         );
         let mut fonts = FontContext::load();
         let layout = layout_styled_document(&styled, &ImageStore::default(), 600, &mut fonts);
-        assert_eq!(layout.content_height, 70);
+        // 60 of cell, 2px of `border-spacing` either side of it, and the
+        // 10px block after: 74, as in Chrome.
+        assert_eq!(layout.content_height, 74);
     }
 
     #[test]
@@ -14845,7 +14959,8 @@ mod tests {
     #[test]
     fn a_table_cell_makes_room_for_its_own_padding_and_border() {
         // Chrome gives this table a 34px row: 24 of line, 8 of padding and 2 of
-        // border. Only the legacy `cellpadding` attribute was counted, so a
+        // border, and the table the UA's 2px of `border-spacing` above and
+        // below it. Only the legacy `cellpadding` attribute was counted, so a
         // table styled the modern way came out short on every side.
         let document = parse_document(
             "<table style=\"width:400px\"><tr><td style=\"padding:4px;border:1px solid black\">a</td></tr></table>",
@@ -14858,7 +14973,7 @@ mod tests {
         );
         let mut fonts = FontContext::load();
         let layout = layout_styled_document(&styled, &ImageStore::default(), 600, &mut fonts);
-        assert_eq!(layout.content_height, 34);
+        assert_eq!(layout.content_height, 38);
     }
 
     #[test]

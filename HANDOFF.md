@@ -740,9 +740,15 @@ receiver の own property 数 1 / 20 / 100 / 400 で回すと、O(幅) の処理
    した（separate も）。残り: 列の幅が整数なので、自動幅の表で 1px ずれる
    （`tablew` t3 が 292 → 291、`collapse.html` の e/g/h）。前に t3 が合うとったのは
    内側の線を二重に数えとったのが丸めの分をたまたま埋めとっただけ。直すなら列の幅を
-   1/64px で持つ。separate の表は**既定の border-spacing 2px も表自身の枠も
-   無視しとる**（Chrome の t4 は 36x28、tobira 30x24）し、`<table border=1>` の
-   セルの枠も出ん。どれも別件。~~g4 の `lnk` と `inlx` の `f` は太字を普通の字幅で測っとる~~
+   1/64px で持つ。~~separate の表は既定の border-spacing 2px も表自身の枠も
+   無視しとる~~ → **2026-10-10 に直した**（`tools/geom/separate.html` 0 → 27/27）。
+   separate の表は外から「枠 → 余白 → `border-spacing` → セル」で組む。
+   `border-spacing` は CSS で読み、`<table>` の既定 2px、`cellspacing` で上書き。
+   `<table border=N>` は表に N px、セルに 1px の灰色の枠（Chrome は outset/inset の
+   立体で、ここは平たい）。表自身の背景と枠も描くようにした（前は表の `bgcolor`
+   すら塗っとらんかった。HN のベージュの地がこれ）。
+   **quirks モードの表の font リセットは無い**: doctype の無い頁で Chrome は表の
+   中の line-height / font-size を normal / medium に戻す。tobira は戻さん。~~g4 の `lnk` と `inlx` の `f` は太字を普通の字幅で測っとる~~
    → **2026-10-02 に直した（g4 14/14）**: 測る側（`glyph_advance_px` /
    `text_width_px` / `text_width_lu`）に `bold` を渡し、描く側も太字の
    advance で進める。ついでに**名前指定の書体（Arial 等）の太字が一度も
@@ -910,6 +916,13 @@ python tools/geom/cmp.py g4.html
 ```
 
 ## Session Log
+
+### 2026-10-10 - Claude (separate の表)
+
+- separate の表に既定の 2px の間隔、表自身の枠と余白、`border=N` の枠を入れた。
+  表の背景と枠も描く。separate.html 0 → 27/27、geom 全体 351 → 378/508（ほかは
+  変わらず）。テストの期待値を 2 本 Chrome の値に直した（間隔を数えとらんかった）。
+  1212 通過 / 4 落ち（前と同じ 4 本）。
 
 ### 2026-10-02 - Claude (表の border-collapse)
 

@@ -1766,6 +1766,16 @@ pub struct ComputedStyle {
     /// `border-collapse: collapse`: a table's cells share the borders between
     /// them rather than each drawing its own. Inherited, as in CSS.
     pub border_collapse: bool,
+    /// `border-spacing`: the gap between a separated table's cells, across
+    /// and down, and between them and the table's padding. Inherited, as in
+    /// CSS; the UA stylesheet gives a `<table>` 2px, and `cellspacing`
+    /// replaces it.
+    pub border_spacing_x: u32,
+    pub border_spacing_y: u32,
+    /// The table this element sits in has a `border` attribute, which gives
+    /// every cell in it a 1px border of its own (the UA stylesheet's
+    /// `table[border] td`).
+    pub table_cell_borders: bool,
     /// The gap between columns.
     ///
     /// `gap` sets two: the first length is between rows, the second
@@ -1811,6 +1821,9 @@ impl ComputedStyle {
             padding: EdgeSizes::default(),
             table_cellpadding: parent.and_then(|parent| parent.table_cellpadding),
             border_collapse: parent.is_some_and(|parent| parent.border_collapse),
+            border_spacing_x: parent.map_or(0, |parent| parent.border_spacing_x),
+            border_spacing_y: parent.map_or(0, |parent| parent.border_spacing_y),
+            table_cell_borders: parent.is_some_and(|parent| parent.table_cell_borders),
             column_gap: 0,
             grid_auto_flow_column: false,
             justify_items: AlignItems::Stretch,
@@ -2020,8 +2033,18 @@ impl ComputedStyle {
             "big" => {
                 style.font_size_mpx = parent_font_size_mpx.saturating_add(2 * MPX);
             }
+            "table" => {
+                style.border_spacing_x = 2;
+                style.border_spacing_y = 2;
+                style.table_cell_borders = false;
+            }
             "td" | "th" => {
                 style.vertical_align = VerticalAlign::Middle;
+                if style.table_cell_borders {
+                    style.border = EdgeSizes::all(1);
+                    style.border_color = TABLE_BORDER_GRAY;
+                    style.border_style_none = false;
+                }
                 // The UA stylesheet gives a cell a pixel on every side,
                 // and `cellpadding` on the table replaces that number.
                 // Both sit below the page's own rules, so a `td { padding }`
@@ -5414,6 +5437,23 @@ fn apply_declaration(style: &mut ComputedStyle, declaration: &Declaration, paren
                 style.text_align = text_align;
             }
         }
+        "border-spacing" => {
+            let lengths: Vec<u32> = value
+                .split_whitespace()
+                .filter_map(|part| parse_length(part, parent_font_size_mpx))
+                .collect();
+            match lengths.as_slice() {
+                [both] => {
+                    style.border_spacing_x = *both;
+                    style.border_spacing_y = *both;
+                }
+                [across, down] => {
+                    style.border_spacing_x = *across;
+                    style.border_spacing_y = *down;
+                }
+                _ => {}
+            }
+        }
         "border-collapse" => match value.trim().to_ascii_lowercase().as_str() {
             "collapse" => style.border_collapse = true,
             "separate" => style.border_collapse = false,
@@ -6339,6 +6379,9 @@ fn default_margin(tag_name: &str) -> SignedEdgeSizes {
 // Legacy HTML attributes
 // ─────────────────────────────────────────────────────────────────────────────
 
+/// The grey the UA stylesheet draws a `border` attribute's lines in.
+const TABLE_BORDER_GRAY: Color = 0x808080;
+
 fn apply_legacy_attributes(style: &mut ComputedStyle, element: &Element, parent_font_size_mpx: u32) {
     // `open` is what unfolds a `<details>`; its value does not matter, only
     // whether it is written at all.
@@ -6364,6 +6407,26 @@ fn apply_legacy_attributes(style: &mut ComputedStyle, element: &Element, parent_
         style.table_cellpadding = element
             .attribute("cellpadding")
             .and_then(|value| value.trim().parse::<u32>().ok());
+        if let Some(spacing) = element
+            .attribute("cellspacing")
+            .and_then(|value| value.trim().parse::<u32>().ok())
+        {
+            style.border_spacing_x = spacing;
+            style.border_spacing_y = spacing;
+        }
+        // `<table border="3">`: a 3px border round the table and a pixel
+        // round every cell, both grey (Chrome draws them outset and inset;
+        // here they are flat). An empty value counts as 1; `border="0"`
+        // turns both off.
+        if let Some(value) = element.attribute("border") {
+            let width = value.trim().parse::<u32>().unwrap_or(1);
+            if width > 0 {
+                style.border = EdgeSizes::all(width);
+                style.border_color = TABLE_BORDER_GRAY;
+                style.border_style_none = false;
+                style.table_cell_borders = true;
+            }
+        }
     }
 
     if let Some(width) = element
